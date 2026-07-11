@@ -1138,11 +1138,23 @@ function App() {
   }, [isPlayerExpanded, playerTab, lyricsScrollLocked, syncLyricsScroll]);
 
   // Fetch lyrics when track changes
+  // Fetch lyrics and reset slider when track changes
   useEffect(() => {
     if (currentTrack) {
       fetchLyrics(currentTrack);
       fetchRelatedTracks(currentTrack.artist);
     }
+    
+    // Reset playback bar DOM elements on track change
+    const tMin = document.getElementById("player-time-min");
+    const tExp = document.getElementById("player-time-exp");
+    const sMin = document.getElementById("player-slider-min") as HTMLInputElement | null;
+    const sExp = document.getElementById("player-slider-exp") as HTMLInputElement | null;
+    
+    if (tMin) tMin.textContent = "00:00";
+    if (tExp) tExp.textContent = "00:00";
+    if (sMin) sMin.value = "0";
+    if (sExp) sExp.value = "0";
   }, [currentTrack?.id]);
 
 
@@ -2286,7 +2298,24 @@ function App() {
   };
 
   const handleTimeUpdate = () => {
-    if (audioRef.current) { setCurrentTime(audioRef.current.currentTime); }
+    if (audioRef.current) {
+      const cur = audioRef.current.currentTime;
+      // Throttled state update to avoid rendering the 7000+ line App component 25 times per second
+      if (Math.abs(currentTimeRef.current - cur) > 1.2) {
+        setCurrentTime(cur);
+      }
+      // Instant DOM updates for smooth UI
+      const tMin = document.getElementById("player-time-min");
+      const tExp = document.getElementById("player-time-exp");
+      const sMin = document.getElementById("player-slider-min") as HTMLInputElement | null;
+      const sExp = document.getElementById("player-slider-exp") as HTMLInputElement | null;
+      
+      const formatted = formatTime(cur);
+      if (tMin) tMin.textContent = formatted;
+      if (tExp) tExp.textContent = formatted;
+      if (sMin) sMin.value = cur.toString();
+      if (sExp) sExp.value = cur.toString();
+    }
   };
 
   const handleLoadedMetadata = () => {
@@ -2297,6 +2326,13 @@ function App() {
     const val = parseFloat(e.target.value);
     setCurrentTime(val);
     if (audioRef.current) { audioRef.current.currentTime = val; }
+    
+    // Instant time update during dragging
+    const tMin = document.getElementById("player-time-min");
+    const tExp = document.getElementById("player-time-exp");
+    const formatted = formatTime(val);
+    if (tMin) tMin.textContent = formatted;
+    if (tExp) tExp.textContent = formatted;
   };
 
   const playNext = () => {
@@ -6276,9 +6312,10 @@ function App() {
               </button>
             </div>
             <div className="w-full flex items-center gap-3">
-              <span className="text-[10px] text-text-secondary w-8 text-right">{formatTime(currentTime)}</span>
+              <span id="player-time-min" className="text-[10px] text-text-secondary w-8 text-right">{formatTime(currentTime)}</span>
               <input 
-                type="range" min="0" max={duration || 100} value={currentTime} onChange={handleSeek} disabled={!streamUrl}
+                id="player-slider-min"
+                type="range" min="0" max={duration || 100} onChange={handleSeek} disabled={!streamUrl}
                 onClick={(e) => e.stopPropagation()}
                 onMouseDown={(e) => e.stopPropagation()}
                 onTouchStart={(e) => e.stopPropagation()}
@@ -6464,8 +6501,8 @@ function App() {
 
               {/* Time Slider */}
               <div className="w-full flex items-center gap-3 px-4">
-                <span className="text-xs text-text-secondary w-10 text-right">{formatTime(currentTime)}</span>
-                <input type="range" min="0" max={duration || 100} value={currentTime} onChange={handleSeek}
+                <span id="player-time-exp" className="text-xs text-text-secondary w-10 text-right">{formatTime(currentTime)}</span>
+                <input id="player-slider-exp" type="range" min="0" max={duration || 100} onChange={handleSeek}
                   className="flex-1 accent-brand-primary h-1 bg-white/10 rounded-full cursor-pointer" />
                 <span className="text-xs text-text-secondary w-10 text-left">{formatTime(duration)}</span>
               </div>
