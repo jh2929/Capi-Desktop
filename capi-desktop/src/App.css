@@ -85,6 +85,86 @@
   --glass-border: rgba(255, 255, 255, 0.08);
 }
 
+:root.theme-sunset-orange {
+  --brand-primary: #fb923c;
+  --brand-secondary: #fdba74;
+  --brand-tertiary: #f97316;
+  --bg-dark: #1c1917;
+  --surface-dark: #292524;
+  --surface-variant: #44403c;
+  --text-primary: #fff7ed;
+  --text-secondary: #d6d3d1;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --bg-hover: rgba(255, 255, 255, 0.05);
+  --bg-active: rgba(255, 255, 255, 0.1);
+  --glass-bg: rgba(41, 37, 36, 0.75);
+  --glass-border: rgba(255, 255, 255, 0.08);
+}
+
+:root.theme-ocean-blue {
+  --brand-primary: #38bdf8;
+  --brand-secondary: #7dd3fc;
+  --brand-tertiary: #0ea5e9;
+  --bg-dark: #020617;
+  --surface-dark: #0f172a;
+  --surface-variant: #1e293b;
+  --text-primary: #f0f9ff;
+  --text-secondary: #94a3b8;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --bg-hover: rgba(255, 255, 255, 0.05);
+  --bg-active: rgba(255, 255, 255, 0.1);
+  --glass-bg: rgba(15, 23, 42, 0.75);
+  --glass-border: rgba(255, 255, 255, 0.08);
+}
+
+:root.theme-cherry-blossom {
+  --brand-primary: #f472b6;
+  --brand-secondary: #f9a8d4;
+  --brand-tertiary: #ec4899;
+  --bg-dark: #1c1820;
+  --surface-dark: #2a1f2e;
+  --surface-variant: #4a2d4a;
+  --text-primary: #fdf2f8;
+  --text-secondary: #d4c4d0;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --bg-hover: rgba(255, 255, 255, 0.05);
+  --bg-active: rgba(255, 255, 255, 0.1);
+  --glass-bg: rgba(42, 31, 46, 0.75);
+  --glass-border: rgba(255, 255, 255, 0.08);
+}
+
+:root.theme-nordic {
+  --brand-primary: #88c0d0;
+  --brand-secondary: #8fbcbb;
+  --brand-tertiary: #81a1c1;
+  --bg-dark: #2e3440;
+  --surface-dark: #3b4252;
+  --surface-variant: #4c566a;
+  --text-primary: #eceff4;
+  --text-secondary: #d8dee9;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --bg-hover: rgba(255, 255, 255, 0.05);
+  --bg-active: rgba(255, 255, 255, 0.1);
+  --glass-bg: rgba(59, 66, 82, 0.75);
+  --glass-border: rgba(255, 255, 255, 0.08);
+}
+
+:root.theme-dracula {
+  --brand-primary: #bd93f9;
+  --brand-secondary: #ff79c6;
+  --brand-tertiary: #8be9fd;
+  --bg-dark: #282a36;
+  --surface-dark: #44475a;
+  --surface-variant: #6272a4;
+  --text-primary: #f8f8f2;
+  --text-secondary: #c0c0d0;
+  --border-subtle: rgba(255, 255, 255, 0.08);
+  --bg-hover: rgba(255, 255, 255, 0.05);
+  --bg-active: rgba(255, 255, 255, 0.1);
+  --glass-bg: rgba(68, 71, 90, 0.75);
+  --glass-border: rgba(255, 255, 255, 0.08);
+}
+
 @theme {
   --color-brand-primary: var(--brand-primary);
   --color-brand-secondary: var(--brand-secondary);
@@ -253,6 +333,29 @@ body {
 :root.theme-light-mode .skeleton-shimmer {
   background: linear-gradient(90deg, rgba(0, 0, 0, 0.06) 25%, rgba(0, 0, 0, 0.12) 50%, rgba(0, 0, 0, 0.06) 75%);
   background-size: 200% 100%;
+}
+
+/* Edge blur overlay for horizontal scroll sections */
+.scroll-edge-fade {
+  position: relative;
+}
+.scroll-edge-fade::before,
+.scroll-edge-fade::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 48px;
+  z-index: 5;
+  pointer-events: none;
+}
+.scroll-edge-fade::before {
+  left: 0;
+  background: linear-gradient(to right, var(--bg-dark) 0%, transparent 100%);
+}
+.scroll-edge-fade::after {
+  right: 0;
+  background: linear-gradient(to left, var(--bg-dark) 0%, transparent 100%);
 }
 
 /* Storage Bar Animation */

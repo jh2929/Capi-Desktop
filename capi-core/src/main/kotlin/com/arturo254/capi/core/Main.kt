@@ -465,6 +465,9 @@ fun main(args: Array<String>) {
                                     throw Exception("Failed to refresh visitorData")
                                 }
                             }
+                            "ping" -> {
+                                Json.encodeToString(mapOf("status" to "pong"))
+                            }
                             "set-tokens" -> {
                                 val newPoToken = cmdObj["poToken"]?.jsonPrimitive?.contentOrNull
                                 val newVisitorData = cmdObj["visitorData"]?.jsonPrimitive?.contentOrNull

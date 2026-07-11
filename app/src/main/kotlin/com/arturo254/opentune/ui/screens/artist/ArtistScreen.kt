@@ -361,80 +361,81 @@ fun ArtistScreen(
                 item(key = "shimmer") {
                     ShimmerHost {
                         // Hero section placeholder
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(top = systemBarsTopPadding + AppBarHeight)
+                        Box(
+                            modifier = Modifier.fillMaxWidth()
                         ) {
-                            // Artist image placeholder - circular
+                            // Banner image placeholder
                             Box(
                                 modifier = Modifier
-                                    .padding(top = 8.dp)
-                                    .size(210.dp)
-                                    .align(Alignment.CenterHorizontally)
-                                    .shimmer()
-                                    .clip(CircleShape)
-                                    .background(MaterialTheme.colorScheme.onSurface)
-                            )
-
-                            Spacer(modifier = Modifier.height(24.dp))
-
-                            // Artist name placeholder
-                            TextPlaceholder(
-                                height = 32.dp,
-                                modifier = Modifier
-                                    .fillMaxWidth(0.5f)
-                                    .align(Alignment.CenterHorizontally)
-                            )
-
-                            Spacer(modifier = Modifier.height(12.dp))
-
-                            // Stats placeholder
-                            Row(
-                                modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 48.dp),
-                                horizontalArrangement = Arrangement.SpaceEvenly
-                            ) {
-                                repeat(3) {
-                                    Column(
-                                        horizontalAlignment = Alignment.CenterHorizontally
-                                    ) {
-                                        TextPlaceholder(
-                                            height = 20.dp,
-                                            modifier = Modifier.width(40.dp)
-                                        )
-                                        Spacer(modifier = Modifier.height(4.dp))
-                                        TextPlaceholder(
-                                            height = 14.dp,
-                                            modifier = Modifier.width(50.dp)
-                                        )
-                                    }
-                                }
-                            }
+                                    .height(360.dp)
+                                    .shimmer()
+                                    .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f))
+                            )
 
-                            Spacer(modifier = Modifier.height(24.dp))
-
-                            // Buttons placeholder
-                            Row(
+                            Column(
                                 modifier = Modifier
                                     .fillMaxWidth()
                                     .padding(horizontal = 24.dp),
-                                horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally)
+                                horizontalAlignment = Alignment.CenterHorizontally
                             ) {
-                                ButtonPlaceholder(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .height(48.dp)
-                                )
-                                ButtonPlaceholder(
-                                    modifier = Modifier
-                                        .weight(1f)
-                                        .height(48.dp)
-                                )
-                            }
+                                Spacer(modifier = Modifier.height(200.dp))
 
-                            Spacer(modifier = Modifier.height(32.dp))
+                                // Artist name placeholder
+                                TextPlaceholder(
+                                    height = 32.dp,
+                                    modifier = Modifier
+                                        .fillMaxWidth(0.5f)
+                                        .align(Alignment.CenterHorizontally)
+                                )
+
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                // Stats placeholder
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 48.dp),
+                                    horizontalArrangement = Arrangement.SpaceEvenly
+                                ) {
+                                    repeat(2) {
+                                        Column(
+                                            horizontalAlignment = Alignment.CenterHorizontally
+                                        ) {
+                                            TextPlaceholder(
+                                                height = 20.dp,
+                                                modifier = Modifier.width(40.dp)
+                                            )
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            TextPlaceholder(
+                                                height = 14.dp,
+                                                modifier = Modifier.width(50.dp)
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(24.dp))
+
+                                // Buttons placeholder
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally)
+                                ) {
+                                    ButtonPlaceholder(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(48.dp)
+                                    )
+                                    ButtonPlaceholder(
+                                        modifier = Modifier
+                                            .weight(1f)
+                                            .height(48.dp)
+                                    )
+                                }
+
+                                Spacer(modifier = Modifier.height(32.dp))
+                            }
                         }
 
                         // Songs list placeholder
@@ -448,273 +449,298 @@ fun ArtistScreen(
                 item(key = "header") {
                     val artistName = artistPage?.artist?.title ?: libraryArtist?.artist?.name
 
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(top = systemBarsTopPadding + AppBarHeight),
-                        horizontalAlignment = Alignment.CenterHorizontally
+                    Box(
+                        modifier = Modifier.fillMaxWidth()
                     ) {
-                        // Artist Image - Circular with shadow
-                        Box(
-                            modifier = Modifier
-                                .padding(top = 8.dp, bottom = 16.dp)
-                        ) {
-                            if (thumbnail != null) {
-                                AsyncImage(
-                                    model = thumbnail.resize(600, 600),
-                                    contentDescription = null,
-                                    contentScale = ContentScale.Crop,
-                                    modifier = Modifier
-                                        .size(210.dp)
-                                        .clip(CircleShape)
-                                )
-                            } else {
-                                // Placeholder when no image
-                                Box(
-                                    modifier = Modifier
-                                        .size(200.dp)
-                                        .clip(CircleShape)
-                                        .background(MaterialTheme.colorScheme.surfaceVariant),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Icon(
-                                        painter = painterResource(R.drawable.person),
-                                        contentDescription = null,
-                                        modifier = Modifier.size(80.dp),
-                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            }
-                        }
-
-                        // Artist Name
-                        Text(
-                            text = artistName ?: stringResource(R.string.unknown_artist),
-                            style = MaterialTheme.typography.headlineMedium,
-                            fontWeight = FontWeight.Bold,
-                            textAlign = TextAlign.Center,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.padding(horizontal = 24.dp)
-                        )
-
-                        // Artist Description (expandable)
-                        val description = artistPage?.description
-                        if (!description.isNullOrBlank()) {
-                            var isExpanded by rememberSaveable { mutableStateOf(false) }
-                            val maxLines = if (isExpanded) Int.MAX_VALUE else 2
-                            
-                            Column(
+                        // Background banner image
+                        if (thumbnail != null) {
+                            Box(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .padding(horizontal = 24.dp, vertical = 8.dp)
-                                    .combinedClickable(
-                                        onClick = { isExpanded = !isExpanded },
-                                        onLongClick = {}
-                                    ),
-                                horizontalAlignment = Alignment.CenterHorizontally
+                                    .height(360.dp)
                             ) {
-                                Text(
-                                    text = if (!isExpanded && description.length > 100) {
-                                        description.take(100).trimEnd() + "…"
-                                    } else {
-                                        description
-                                    },
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    textAlign = TextAlign.Center,
-                                    maxLines = maxLines,
-                                    overflow = TextOverflow.Ellipsis
-                                )
-                                
-                                if (!isExpanded && description.length > 100) {
-                                    Text(
-                                        text = stringResource(R.string.more),
-                                        style = MaterialTheme.typography.labelMedium,
-                                        color = MaterialTheme.colorScheme.primary,
-                                        fontWeight = FontWeight.Medium,
-                                        modifier = Modifier.padding(top = 4.dp)
-                                    )
-                                }
-                            }
-                        }
-
-                        // Stats Row
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 16.dp, horizontal = 32.dp),
-                            horizontalArrangement = Arrangement.SpaceEvenly
-                        ) {
-                            // Songs count - sum all SongItem instances across all sections
-                            val songSections = artistPage?.sections?.filter { section ->
-                                section.items.any { it is SongItem }
-                            }
-                            val songCount = if (showLocal) {
-                                librarySongs.size
-                            } else {
-                                songSections
-                                    ?.flatMap { it.items }
-                                    ?.filterIsInstance<SongItem>()
-                                    ?.distinctBy { it.id }
-                                    ?.size ?: librarySongs.size
-                            }
-                            // Check if any song section has moreEndpoint (meaning there are more songs)
-                            val hasMoreSongs = !showLocal && songSections?.any { it.moreEndpoint != null } == true
-
-                            if (songCount > 0) {
-                                StatItem(
-                                    value = if (hasMoreSongs) "$songCount+" else songCount.toString(),
-                                    label = stringResource(R.string.songs)
-                                )
-                            }
-
-                            // Albums count - sum all AlbumItem instances across all sections
-                            val albumSections = artistPage?.sections?.filter { section ->
-                                section.items.any { it is AlbumItem }
-                            }
-                            val albumCount = if (showLocal) {
-                                libraryAlbums.size
-                            } else {
-                                albumSections
-                                    ?.flatMap { it.items }
-                                    ?.filterIsInstance<AlbumItem>()
-                                    ?.distinctBy { it.id }
-                                    ?.size ?: libraryAlbums.size
-                            }
-                            // Check if any album section has moreEndpoint (meaning there are more albums)
-                            val hasMoreAlbums = !showLocal && albumSections?.any { it.moreEndpoint != null } == true
-
-                            if (albumCount > 0) {
-                                StatItem(
-                                    value = if (hasMoreAlbums) "$albumCount+" else albumCount.toString(),
-                                    label = stringResource(R.string.albums)
-                                )
-                            }
-                        }
-
-                        // Action Buttons
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(horizontal = 24.dp, vertical = 8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally)
-                        ) {
-                            // Subscribe/Following Button
-                            val isSubscribed = libraryArtist?.artist?.bookmarkedAt != null
-
-                            FilledTonalButton(
-                                onClick = {
-                                    database.transaction {
-                                        val artist = libraryArtist?.artist
-                                        if (artist != null) {
-                                            update(artist.toggleLike())
-                                        } else {
-                                            artistPage?.artist?.let {
-                                                insert(
-                                                    ArtistEntity(
-                                                        id = it.id,
-                                                        name = it.title,
-                                                        channelId = it.channelId,
-                                                        thumbnailUrl = it.thumbnail,
-                                                    ).toggleLike()
-                                                )
-                                            }
-                                        }
-                                    }
-                                },
-                                colors = ButtonDefaults.filledTonalButtonColors(
-                                    containerColor = if (isSubscribed)
-                                        MaterialTheme.colorScheme.primaryContainer
-                                    else
-                                        MaterialTheme.colorScheme.secondaryContainer,
-                                    contentColor = if (isSubscribed)
-                                        MaterialTheme.colorScheme.onPrimaryContainer
-                                    else
-                                        MaterialTheme.colorScheme.onSecondaryContainer
-                                ),
-                                shape = RoundedCornerShape(24.dp),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(48.dp)
-                            ) {
-                                Icon(
-                                    painter = painterResource(
-                                        if (isSubscribed) R.drawable.done else R.drawable.add
-                                    ),
+                                AsyncImage(
+                                    model = thumbnail.resize(1080, 1080),
                                     contentDescription = null,
-                                    modifier = Modifier.size(20.dp)
+                                    contentScale = ContentScale.Crop,
+                                    modifier = Modifier.fillMaxSize()
                                 )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = stringResource(
-                                        if (isSubscribed) R.string.subscribed else R.string.subscribe
-                                    ),
-                                    maxLines = 1
-                                )
-                            }
-
-                            // Shuffle Button
-                            Button(
-                                onClick = {
-                                    if (!showLocal) {
-                                        artistPage?.artist?.shuffleEndpoint?.let { shuffleEndpoint ->
-                                            playerConnection.playQueue(YouTubeQueue(shuffleEndpoint))
-                                        }
-                                    } else if (librarySongs.isNotEmpty()) {
-                                        val shuffledSongs = librarySongs.shuffled()
-                                        playerConnection.playQueue(
-                                            ListQueue(
-                                                title = libraryArtist?.artist?.name ?: "Unknown Artist",
-                                                items = shuffledSongs.map { it.toMediaItem() }
+                                // Scrim overlay (dark at top, transparent in middle, surface color at bottom)
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxSize()
+                                        .background(
+                                            Brush.verticalGradient(
+                                                colors = listOf(
+                                                    Color.Black.copy(alpha = 0.5f),
+                                                    Color.Transparent,
+                                                    surfaceColor.copy(alpha = 0.6f),
+                                                    surfaceColor
+                                                )
                                             )
                                         )
-                                    }
-                                },
-                                enabled = if (showLocal) librarySongs.isNotEmpty() else artistPage?.artist?.shuffleEndpoint != null,
-                                shape = RoundedCornerShape(24.dp),
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .height(48.dp)
-                            ) {
-                                Icon(
-                                    painter = painterResource(R.drawable.shuffle),
-                                    contentDescription = null,
-                                    modifier = Modifier.size(20.dp)
-                                )
-                                Spacer(modifier = Modifier.width(8.dp))
-                                Text(
-                                    text = stringResource(R.string.shuffle),
-                                    maxLines = 1
                                 )
                             }
+                        } else {
+                            // Placeholder background
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(240.dp)
+                                    .background(
+                                        Brush.verticalGradient(
+                                            colors = listOf(
+                                                MaterialTheme.colorScheme.surfaceVariant,
+                                                surfaceColor
+                                            )
+                                        )
+                                    )
+                            )
                         }
 
-                        // Radio Button (for YouTube artists)
-                        if (!showLocal) {
-                            artistPage?.artist?.radioEndpoint?.let { radioEndpoint ->
-                                OutlinedButton(
-                                    onClick = {
-                                        playerConnection.playQueue(YouTubeQueue(radioEndpoint))
-                                    },
-                                    shape = RoundedCornerShape(24.dp),
+                        // Content column containing Name, description, stats, buttons
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            // Top spacer to push contents down so they overlap with the bottom of the image
+                            // and clear the top status bar / app bar.
+                            Spacer(
+                                modifier = Modifier.height(
+                                    if (thumbnail != null) 200.dp else systemBarsTopPadding + AppBarHeight + 16.dp
+                                )
+                            )
+
+                            // Artist Name
+                            Text(
+                                text = artistName ?: stringResource(R.string.unknown_artist),
+                                style = MaterialTheme.typography.headlineLarge,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = TextAlign.Center,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis
+                            )
+
+                            // Artist Description (expandable)
+                            val description = artistPage?.description
+                            if (!description.isNullOrBlank()) {
+                                var isExpanded by rememberSaveable { mutableStateOf(false) }
+                                val maxLines = if (isExpanded) Int.MAX_VALUE else 2
+                                
+                                Column(
                                     modifier = Modifier
                                         .fillMaxWidth()
-                                        .padding(horizontal = 24.dp, vertical = 8.dp)
-                                        .height(44.dp)
+                                        .padding(vertical = 8.dp)
+                                        .combinedClickable(
+                                            onClick = { isExpanded = !isExpanded },
+                                            onLongClick = {}
+                                        ),
+                                    horizontalAlignment = Alignment.CenterHorizontally
                                 ) {
-                                    Icon(
-                                        painter = painterResource(R.drawable.radio),
-                                        contentDescription = null,
-                                        modifier = Modifier.size(18.dp)
+                                    Text(
+                                        text = if (!isExpanded && description.length > 100) {
+                                            description.take(100).trimEnd() + "…"
+                                        } else {
+                                            description
+                                        },
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        textAlign = TextAlign.Center,
+                                        maxLines = maxLines,
+                                        overflow = TextOverflow.Ellipsis
                                     )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(text = stringResource(R.string.radio))
+                                    
+                                    if (!isExpanded && description.length > 100) {
+                                        Text(
+                                            text = stringResource(R.string.more),
+                                            style = MaterialTheme.typography.labelMedium,
+                                            color = MaterialTheme.colorScheme.primary,
+                                            fontWeight = FontWeight.Medium,
+                                            modifier = Modifier.padding(top = 4.dp)
+                                        )
+                                    }
                                 }
                             }
-                        }
 
-                        Spacer(modifier = Modifier.height(16.dp))
+                            // Stats Row
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 16.dp),
+                                horizontalArrangement = Arrangement.SpaceEvenly
+                            ) {
+                                // Songs count - sum all SongItem instances across all sections
+                                val songSections = artistPage?.sections?.filter { section ->
+                                    section.items.any { it is SongItem }
+                                }
+                                val songCount = if (showLocal) {
+                                    librarySongs.size
+                                } else {
+                                    songSections
+                                        ?.flatMap { it.items }
+                                        ?.filterIsInstance<SongItem>()
+                                        ?.distinctBy { it.id }
+                                        ?.size ?: librarySongs.size
+                                }
+                                // Check if any song section has moreEndpoint (meaning there are more songs)
+                                val hasMoreSongs = !showLocal && songSections?.any { it.moreEndpoint != null } == true
+
+                                if (songCount > 0) {
+                                    StatItem(
+                                        value = if (hasMoreSongs) "$songCount+" else songCount.toString(),
+                                        label = stringResource(R.string.songs)
+                                    )
+                                }
+
+                                // Albums count - sum all AlbumItem instances across all sections
+                                val albumSections = artistPage?.sections?.filter { section ->
+                                    section.items.any { it is AlbumItem }
+                                }
+                                val albumCount = if (showLocal) {
+                                    libraryAlbums.size
+                                } else {
+                                    albumSections
+                                        ?.flatMap { it.items }
+                                        ?.filterIsInstance<AlbumItem>()
+                                        ?.distinctBy { it.id }
+                                        ?.size ?: libraryAlbums.size
+                                }
+                                // Check if any album section has moreEndpoint (meaning there are more albums)
+                                val hasMoreAlbums = !showLocal && albumSections?.any { it.moreEndpoint != null } == true
+
+                                if (albumCount > 0) {
+                                    StatItem(
+                                        value = if (hasMoreAlbums) "$albumCount+" else albumCount.toString(),
+                                        label = stringResource(R.string.albums)
+                                    )
+                                }
+                            }
+
+                            // Action Buttons
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 8.dp),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp, Alignment.CenterHorizontally)
+                            ) {
+                                // Subscribe/Following Button
+                                val isSubscribed = libraryArtist?.artist?.bookmarkedAt != null
+
+                                FilledTonalButton(
+                                    onClick = {
+                                        database.transaction {
+                                            val artist = libraryArtist?.artist
+                                            if (artist != null) {
+                                                update(artist.toggleLike())
+                                            } else {
+                                                artistPage?.artist?.let {
+                                                    insert(
+                                                        ArtistEntity(
+                                                            id = it.id,
+                                                            name = it.title,
+                                                            channelId = it.channelId,
+                                                            thumbnailUrl = it.thumbnail,
+                                                        ).toggleLike()
+                                                    )
+                                                }
+                                            }
+                                        }
+                                    },
+                                    colors = ButtonDefaults.filledTonalButtonColors(
+                                        containerColor = if (isSubscribed)
+                                            MaterialTheme.colorScheme.primaryContainer
+                                        else
+                                            MaterialTheme.colorScheme.secondaryContainer,
+                                        contentColor = if (isSubscribed)
+                                            MaterialTheme.colorScheme.onPrimaryContainer
+                                        else
+                                            MaterialTheme.colorScheme.onSecondaryContainer
+                                    ),
+                                    shape = RoundedCornerShape(24.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(48.dp)
+                                ) {
+                                    Icon(
+                                        painter = painterResource(
+                                            if (isSubscribed) R.drawable.done else R.drawable.add
+                                        ),
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = stringResource(
+                                            if (isSubscribed) R.string.subscribed else R.string.subscribe
+                                        ),
+                                        maxLines = 1
+                                    )
+                                }
+
+                                // Shuffle Button
+                                Button(
+                                    onClick = {
+                                        if (!showLocal) {
+                                            artistPage?.artist?.shuffleEndpoint?.let { shuffleEndpoint ->
+                                                playerConnection.playQueue(YouTubeQueue(shuffleEndpoint))
+                                            }
+                                        } else if (librarySongs.isNotEmpty()) {
+                                            val shuffledSongs = librarySongs.shuffled()
+                                            playerConnection.playQueue(
+                                                ListQueue(
+                                                    title = libraryArtist?.artist?.name ?: "Unknown Artist",
+                                                    items = shuffledSongs.map { it.toMediaItem() }
+                                                )
+                                            )
+                                        }
+                                    },
+                                    enabled = if (showLocal) librarySongs.isNotEmpty() else artistPage?.artist?.shuffleEndpoint != null,
+                                    shape = RoundedCornerShape(24.dp),
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(48.dp)
+                                ) {
+                                    Icon(
+                                        painter = painterResource(R.drawable.shuffle),
+                                        contentDescription = null,
+                                        modifier = Modifier.size(20.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = stringResource(R.string.shuffle),
+                                        maxLines = 1
+                                    )
+                                }
+                            }
+
+                            // Radio Button (for YouTube artists)
+                            if (!showLocal) {
+                                artistPage?.artist?.radioEndpoint?.let { radioEndpoint ->
+                                    OutlinedButton(
+                                        onClick = {
+                                            playerConnection.playQueue(YouTubeQueue(radioEndpoint))
+                                        },
+                                        shape = RoundedCornerShape(24.dp),
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 8.dp)
+                                            .height(44.dp)
+                                    ) {
+                                        Icon(
+                                            painter = painterResource(R.drawable.radio),
+                                            contentDescription = null,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(text = stringResource(R.string.radio))
+                                    }
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(16.dp))
+                        }
                     }
                 }
 

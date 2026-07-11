@@ -377,7 +377,10 @@ async fn send_daemon_command(
 
     match result {
         Ok(Ok(Ok(resp))) => Ok(resp),
-        Ok(Ok(Err(e))) => Err(e),
+        Ok(Ok(Err(e))) => {
+            eprintln!("[DAEMON] Pipe error (daemon likely dead): {e}");
+            Err("El daemon dejó de responder".to_string())
+        }
         Ok(Err(join_err)) => Err(format!("Daemon thread error: {}", join_err)),
         Err(_elapsed) => {
             // Timeout — kill daemon to unblock the stuck thread
@@ -470,6 +473,13 @@ fn spawn_daemon_process(binary: &PathBuf) -> Result<(DaemonProcess, std::process
 }
 
 fn restart_daemon(app: &tauri::AppHandle) -> Result<(), String> {
+    // Reap old zombie before spawning new daemon
+    if let Some(old_child) = app.try_state::<Arc<Mutex<std::process::Child>>>() {
+        if let Ok(mut guard) = old_child.inner().lock() {
+            let _ = guard.try_wait();
+        }
+    }
+
     let binary = get_binary_path(app)?;
     let (daemon, child) = spawn_daemon_process(&binary)?;
     app.manage(Arc::new(daemon));
@@ -1382,6 +1392,37 @@ pub fn run() {
                 let local_port = start_local_server(capi_dir)?;
                 app.manage(LocalServerState { port: local_port });
                 app.manage(DiscordState { client: Mutex::new(None) });
+
+                // ─── Daemon Watchdog ─────────────────────────────────
+                let watchdog_handle = handle.clone();
+                std::thread::spawn(move || {
+                    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime for watchdog");
+                    rt.block_on(async {
+                        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+                        // Skip first tick so the daemon has time to initialize
+                        interval.tick().await;
+                        loop {
+                            interval.tick().await;
+                            let daemon = match watchdog_handle.try_state::<Arc<DaemonProcess>>() {
+                                Some(s) => s.inner().clone(),
+                                None => continue,
+                            };
+                            let child = match watchdog_handle.try_state::<Arc<Mutex<std::process::Child>>>() {
+                                Some(s) => s.inner().clone(),
+                                None => continue,
+                            };
+                            if send_daemon_command(daemon, child, r#"{"action":"ping"}"#.to_string()).await.is_err() {
+                                eprintln!("[WATCHDOG] Daemon not responding, restarting...");
+                                if let Err(e) = restart_daemon(&watchdog_handle) {
+                                    eprintln!("[WATCHDOG] Failed to restart daemon: {e}");
+                                } else {
+                                    eprintln!("[WATCHDOG] Daemon restarted successfully");
+                                }
+                            }
+                        }
+                    });
+                });
+
                 Ok(())
             })() {
                 #[cfg(not(target_os = "linux"))]
