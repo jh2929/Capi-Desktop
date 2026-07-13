@@ -3211,7 +3211,7 @@ function App() {
                               if (!isActive) setCarouselIndex(idx);
                               else playTrack(track);
                             }}
-                            className={`absolute top-0 h-full rounded-3xl overflow-hidden shadow-xl cursor-pointer transition-all duration-500 ${
+                            className={`absolute top-0 h-full rounded-3xl overflow-hidden shadow-xl cursor-pointer transition-[transform,filter] duration-500 ${
                               isActive ? "z-20" : ""
                             }`}
                             style={{
@@ -3222,10 +3222,11 @@ function App() {
                                 : `translateX(${dir * dist * step}%)`,
                               zIndex: zMap[dist] || 10,
                               filter: isActive ? "none" : "grayscale(0.5)",
+                              willChange: "transform",
                             }}
                           >
                             <SafeImage src={track.thumbnail} className="absolute inset-0 w-full h-full object-cover" alt="" />
-                            <div className="absolute inset-0 scale-105 blur-lg opacity-50 transition-all duration-500">
+                            <div className="absolute inset-0 scale-105 blur-lg opacity-50">
                               <SafeImage src={track.thumbnail} className="w-full h-full object-cover" alt="" />
                             </div>
                             <div className="absolute inset-0 bg-black/30 backdrop-blur-sm" />
