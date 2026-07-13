@@ -3792,15 +3792,22 @@ function App() {
                       <div>
                         <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wider mb-4">Últimas búsquedas</h3>
                         <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
-                          {searchHistory.map((item, idx) => (
+                          {searchHistory.map((item, idx) => {
+                            const thumbUrl = searchThumbnails[item];
+                            const match = thumbUrl ? (
+                              favorites.find(t => t.thumbnail === thumbUrl) ||
+                              downloadedMetadata.find(t => t.thumbnail === thumbUrl) ||
+                              tracks.find(t => t.thumbnail === thumbUrl)
+                            ) : null;
+                            return (
                             <button
                               key={idx}
                               onClick={() => performSearchWithQuery(item)}
-                              className="group flex flex-col"
+                              className="group flex flex-col cursor-pointer"
                             >
-                              <div className="aspect-square rounded-xl overflow-hidden mb-2 bg-surface-dark/50 shadow-sm">
-                                {searchThumbnails[item] ? (
-                                  <SafeImage src={searchThumbnails[item]} alt={item} className="w-full h-full object-cover group-hover:scale-105 transition" />
+                              <div className="relative aspect-square rounded-xl overflow-hidden mb-2 bg-black/40 shadow-sm">
+                                {thumbUrl ? (
+                                  <SafeImage trackId={match?.id} src={thumbUrl} alt={item} className="w-full h-full object-cover group-hover:scale-105 transition" />
                                 ) : (
                                   <div
                                     className="w-full h-full flex items-center justify-center"
@@ -3809,10 +3816,14 @@ function App() {
                                     <Search className="w-8 h-8 text-white/20" />
                                   </div>
                                 )}
+                                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition flex items-center justify-center">
+                                  <Search className="w-8 h-8 text-white opacity-0 group-hover:opacity-100 transition" />
+                                </div>
                               </div>
                               <p className="font-semibold text-sm text-text-primary truncate text-center leading-tight">{item}</p>
                             </button>
-                          ))}
+                            );
+                          })}
                         </div>
                       </div>
                     )}
