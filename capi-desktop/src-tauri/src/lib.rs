@@ -779,14 +779,15 @@ async fn obtener_explorar(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<Da
 }
 
 #[tauri::command]
-async fn obtener_letras(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<DaemonProcess>>, child: tauri::State<'_, Arc<Mutex<std::process::Child>>>, id: String, artist: String, title: String, album: Option<String>, duration: i32) -> Result<String, String> {
+async fn obtener_letras(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<DaemonProcess>>, child: tauri::State<'_, Arc<Mutex<std::process::Child>>>, id: String, artist: String, title: String, album: Option<String>, duration: i32, provider: Option<String>) -> Result<String, String> {
     let cmd = serde_json::json!({
         "action": "lyrics",
         "id": id,
         "artist": artist,
         "title": title,
         "album": album,
-        "duration": duration
+        "duration": duration,
+        "provider": provider
     }).to_string();
     let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
     if let Err(ref e) = result {
@@ -800,7 +801,8 @@ async fn obtener_letras(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<Daem
                 "artist": artist,
                 "title": title,
                 "album": album,
-                "duration": duration
+                "duration": duration,
+                "provider": provider
             }).to_string();
             return send_daemon_command(new_daemon.inner().clone(), new_child.inner().clone(), cmd2).await;
         }

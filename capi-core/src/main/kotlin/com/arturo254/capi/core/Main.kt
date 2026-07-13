@@ -536,43 +536,43 @@ fun main(args: Array<String>) {
                                 val title = cmdObj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
                                 val album = cmdObj["album"]?.jsonPrimitive?.contentOrNull
                                 val duration = cmdObj["duration"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: -1
+                                val provider = cmdObj["provider"]?.jsonPrimitive?.contentOrNull
 
                                 val result = supervisorScope {
-                                    val deferreds = listOf(
-                                        async(Dispatchers.IO) {
+                                    val allProviders = listOf(
+                                        "YouTube Music" to async(Dispatchers.IO) {
                                             runCatching {
                                                 val nextResult = YouTube.next(WatchEndpoint(videoId = id)).getOrThrow()
                                                 val lyricsEndpoint = nextResult.lyricsEndpoint ?: throw IllegalStateException("No lyrics endpoint")
                                                 YouTube.lyrics(endpoint = lyricsEndpoint).getOrThrow() ?: throw IllegalStateException("Lyrics unavailable")
-                                            }.getOrNull()?.let { "YouTube Music" to it }
+                                            }.getOrNull()
                                         },
-                                        async(Dispatchers.IO) {
-                                            runCatching { YouTube.transcript(id).getOrThrow() }.getOrNull()?.let { "YouTube Subtitle" to it }
+                                        "YouTube Subtitle" to async(Dispatchers.IO) {
+                                            runCatching { YouTube.transcript(id).getOrThrow() }.getOrNull()
                                         },
-                                        async(Dispatchers.IO) {
-                                            LrcLib.getLyrics(title, artist, duration).getOrNull()?.let { "LrcLib" to it }
+                                        "LrcLib" to async(Dispatchers.IO) {
+                                            LrcLib.getLyrics(title, artist, duration).getOrNull()
                                         },
-                                        async(Dispatchers.IO) {
-                                            kugouGetLyrics(title, artist, duration).getOrNull()?.let { "KuGou" to it }
+                                        "KuGou" to async(Dispatchers.IO) {
+                                            kugouGetLyrics(title, artist, duration).getOrNull()
                                         },
-                                        async(Dispatchers.IO) {
-                                            simpmusicGetLyrics(videoId = id, duration = duration).getOrNull()?.let { "SimpMusic" to it }
+                                        "SimpMusic" to async(Dispatchers.IO) {
+                                            simpmusicGetLyrics(videoId = id, duration = duration).getOrNull()
                                         },
-                                        async(Dispatchers.IO) {
-                                            betterlyricsGetLyrics(title = title, artist = artist, album = album, durationSeconds = duration).getOrNull()?.let { raw ->
-                                                "BetterLyrics" to normalizeLyrics(raw)
-                                            }
+                                        "BetterLyrics" to async(Dispatchers.IO) {
+                                            betterlyricsGetLyrics(title = title, artist = artist, album = album, durationSeconds = duration).getOrNull()?.let { normalizeLyrics(it) }
                                         }
                                     )
+                                    val active = if (provider != null) allProviders.filter { it.first == provider } else allProviders
 
                                     val channel = kotlinx.coroutines.channels.Channel<Pair<String, String>>(1)
-                                    var activeJobs = deferreds.size
-                                    deferreds.forEach { deferred ->
+                                    var activeJobs = active.size
+                                    active.forEach { (name, deferred) ->
                                         launch {
                                             try {
                                                 val res = deferred.await()
                                                 if (res != null) {
-                                                    channel.trySend(res)
+                                                    channel.trySend(name to res)
                                                 }
                                             } finally {
                                                 activeJobs--
@@ -586,7 +586,7 @@ fun main(args: Array<String>) {
                                     val firstResult = withTimeoutOrNull(8000) {
                                         channel.receiveCatching().getOrNull()
                                     }
-                                    deferreds.forEach { it.cancel() }
+                                    active.forEach { (_, deferred) -> deferred.cancel() }
                                     firstResult
                                 }
 

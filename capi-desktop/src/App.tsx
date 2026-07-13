@@ -506,6 +506,8 @@ function App() {
   const [playerTab, setPlayerTab] = useState<"queue" | "lyrics" | "related">("lyrics");
   const [relatedTracks, setRelatedTracks] = useState<Track[]>([]);
   const [lyricsMenuOpen, setLyricsMenuOpen] = useState(false);
+  const [lyricsProvider, setLyricsProvider] = useState<string | null>(null);
+  const lyricsMenuRef = useRef<HTMLDivElement | null>(null);
 
   // Swipe Gestures on Player Cover
   const [touchStart, setTouchStart] = useState<number | null>(null);
@@ -1156,6 +1158,7 @@ function App() {
   // Fetch lyrics and reset slider when track changes
   useEffect(() => {
     if (currentTrack) {
+      setLyricsProvider(null);
       fetchLyrics(currentTrack);
       fetchRelatedTracks(currentTrack.artist);
     }
@@ -1171,6 +1174,18 @@ function App() {
     if (sMin) sMin.value = "0";
     if (sExp) sExp.value = "0";
   }, [currentTrack?.id]);
+
+  // Close lyrics menu on click outside
+  useEffect(() => {
+    if (!lyricsMenuOpen) return;
+    const handleClick = (e: MouseEvent) => {
+      if (lyricsMenuRef.current && !lyricsMenuRef.current.contains(e.target as Node)) {
+        setLyricsMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handleClick);
+    return () => document.removeEventListener("mousedown", handleClick);
+  }, [lyricsMenuOpen]);
 
 
 
@@ -1449,7 +1464,7 @@ function App() {
     }
   };
 
-  const fetchLyrics = async (track: Track) => {
+  const fetchLyrics = async (track: Track, providerOverride?: string) => {
     setLyricsText("Cargando letras...");
     setParsedLyrics([]);
     setCurrentLyricIndex(-1);
@@ -1459,10 +1474,12 @@ function App() {
         artist: track.artist,
         title: track.title,
         album: track.album || null,
-        duration: Math.round(track.duration)
+        duration: Math.round(track.duration),
+        provider: providerOverride || null
       });
       const parsed = JSON.parse(response);
       if (parsed && parsed.lyrics) {
+        if (parsed.provider) setLyricsProvider(parsed.provider);
         const text = parsed.lyrics;
         setLyricsText(text);
         const lines = text.split("\n");
@@ -6628,40 +6645,79 @@ function App() {
                           <MoreVertical className="w-4 h-4" />
                         </button>
                         {lyricsMenuOpen && (
-                          <div className="absolute right-0 top-full mt-1 bg-surface-dark border border-white/10 rounded-xl shadow-2xl z-10 w-52 py-1 modal-content">
+                          <div ref={lyricsMenuRef} className="absolute right-0 top-full mt-1 bg-surface-dark border border-white/10 rounded-xl shadow-2xl z-10 w-56 py-1 modal-content">
+                            <div className="px-3 py-2 text-[10px] uppercase tracking-wider text-text-secondary/60 font-bold flex items-center gap-2 border-b border-white/5 mb-1">
+                              <span className="flex-1">Proveedor</span>
+                              <span className="text-brand-primary text-[10px] font-mono">{lyricsProvider || "auto"}</span>
+                            </div>
+                            <div className="space-y-0.5 px-1">
+                              {[
+                                { key: null, label: "Automático (más rápido)" },
+                                { key: "YouTube Music", label: "YouTube Music" },
+                                { key: "YouTube Subtitle", label: "YouTube Subtitle" },
+                                { key: "LrcLib", label: "LrcLib" },
+                                { key: "KuGou", label: "KuGou" },
+                                { key: "SimpMusic", label: "SimpMusic" },
+                                { key: "BetterLyrics", label: "BetterLyrics" },
+                              ].map(opt => (
+                                <button
+                                  key={opt.key ?? "auto"}
+                                  onClick={() => {
+                                    if (currentTrack) {
+                                      if (opt.key !== null) setLyricsProvider(opt.key);
+                                      fetchLyrics(currentTrack, opt.key ?? undefined);
+                                    }
+                                  }}
+                                  className={`w-full text-left px-3 py-1.5 text-xs rounded-lg transition flex items-center justify-between ${
+                                    (opt.key === null && !lyricsProvider) || opt.key === lyricsProvider
+                                      ? "bg-brand-primary/10 text-brand-primary font-bold" : "text-text-secondary hover:bg-white/5 hover:text-text-primary"
+                                  }`}
+                                >
+                                  <span>{opt.label}</span>
+                                  {((opt.key === null && !lyricsProvider) || opt.key === lyricsProvider) && (
+                                    <span className="w-1.5 h-1.5 rounded-full bg-brand-primary flex-shrink-0" />
+                                  )}
+                                </button>
+                              ))}
+                            </div>
+                            <div className="border-t border-white/5 my-1" />
                             <button onClick={copyLyrics} className="w-full text-left px-3 py-2 text-xs hover:bg-brand-primary hover:text-bg-dark rounded-lg transition flex items-center gap-2">
                               <Copy className="w-3.5 h-3.5" /> Copiar toda la letra
                             </button>
-                            <button onClick={() => { if (currentTrack) fetchLyrics(currentTrack); setLyricsMenuOpen(false); }} className="w-full text-left px-3 py-2 text-xs hover:bg-brand-primary hover:text-bg-dark rounded-lg transition flex items-center gap-2">
+                            <button onClick={() => { if (currentTrack) fetchLyrics(currentTrack, lyricsProvider ?? undefined); setLyricsMenuOpen(false); }} className="w-full text-left px-3 py-2 text-xs hover:bg-brand-primary hover:text-bg-dark rounded-lg transition flex items-center gap-2">
                               <RefreshCw className="w-3.5 h-3.5" /> Recargar letras
                             </button>
-                            <div className="border-t border-white/5 my-1" />
-                            <button
-                              onClick={() => { setShowLangSelector(!showLangSelector); }}
-                              className="w-full text-left px-3 py-2 text-xs hover:bg-brand-primary hover:text-bg-dark rounded-lg transition flex items-center gap-2"
-                            >
-                              <Languages className="w-3.5 h-3.5" /> Traducir letras
-                            </button>
-                            {showLangSelector && (
-                              <div className="px-2 py-1 space-y-0.5">
-                                {TRANSLATION_LANGS.map(lang => (
-                                  <button
-                                    key={lang.code}
-                                    onClick={() => {
-                                      setTranslationLang(lang.code);
-                                      localStorage.setItem("capi_translation_lang", lang.code);
-                                      setShowLangSelector(false);
-                                      translateLyrics(lang.code);
-                                    }}
-                                    className={`w-full text-left px-3 py-1.5 text-xs rounded-lg transition flex items-center justify-between ${
-                                      translationLang === lang.code ? "bg-brand-primary/10 text-brand-primary font-bold" : "text-text-secondary hover:bg-white/5 hover:text-text-primary"
-                                    }`}
-                                  >
-                                    <span>{lang.name}</span>
-                                    {translationLang === lang.code && <span className="w-1.5 h-1.5 rounded-full bg-brand-primary" />}
-                                  </button>
-                                ))}
-                              </div>
+                            {translatedLyrics && (
+                              <>
+                                <div className="border-t border-white/5 my-1" />
+                                <button
+                                  onClick={() => { setShowLangSelector(!showLangSelector); }}
+                                  className="w-full text-left px-3 py-2 text-xs hover:bg-brand-primary hover:text-bg-dark rounded-lg transition flex items-center gap-2"
+                                >
+                                  <Languages className="w-3.5 h-3.5" /> Traducir letras
+                                </button>
+                                {showLangSelector && (
+                                  <div className="px-2 py-1 space-y-0.5">
+                                    {TRANSLATION_LANGS.map(lang => (
+                                      <button
+                                        key={lang.code}
+                                        onClick={() => {
+                                          setTranslationLang(lang.code);
+                                          localStorage.setItem("capi_translation_lang", lang.code);
+                                          setShowLangSelector(false);
+                                          translateLyrics(lang.code);
+                                        }}
+                                        className={`w-full text-left px-3 py-1.5 text-xs rounded-lg transition flex items-center justify-between ${
+                                          translationLang === lang.code ? "bg-brand-primary/10 text-brand-primary font-bold" : "text-text-secondary hover:bg-white/5 hover:text-text-primary"
+                                        }`}
+                                      >
+                                        <span>{lang.name}</span>
+                                        {translationLang === lang.code && <span className="w-1.5 h-1.5 rounded-full bg-brand-primary" />}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </>
                             )}
                           </div>
                         )}
