@@ -375,13 +375,6 @@ function App() {
     }
   };
 
-  const goForward = () => {
-    if (navIndex < navHistory.length - 1) {
-      const nextIndex = navIndex + 1;
-      setNavIndex(nextIndex);
-      applyNavState(navHistory[nextIndex]);
-    }
-  };
 
   const [artistCardData, setArtistCardData] = useState<{ id: string; name: string; thumbnail: string; banner: string } | null>(null);
   const [showCreatePlaylistModal, setShowCreatePlaylistModal] = useState(false);
@@ -1014,6 +1007,28 @@ function App() {
             dismissArrow();
             return newVol;
           });
+        } else if (e.key >= "0" && e.key <= "9") {
+          e.preventDefault();
+          const pct = parseInt(e.key) / 10;
+          const dur = audioRef.current?.duration ?? 0;
+          const newTime = dur * pct;
+          if (audioRef.current && dur > 0) {
+            audioRef.current.currentTime = newTime;
+            setCurrentTime(newTime);
+          }
+          setToastData({ kind: "text", message: `${Math.round(pct * 100)}%` });
+          dismissArrow();
+        } else if (e.key.startsWith("Numpad") && e.key.length === 7) {
+          e.preventDefault();
+          const pct = parseInt(e.key[6]) / 10;
+          const dur = audioRef.current?.duration ?? 0;
+          const newTime = dur * pct;
+          if (audioRef.current && dur > 0) {
+            audioRef.current.currentTime = newTime;
+            setCurrentTime(newTime);
+          }
+          setToastData({ kind: "text", message: `${Math.round(pct * 100)}%` });
+          dismissArrow();
         }
       }
     };
@@ -1255,16 +1270,11 @@ function App() {
 
   const fetchNewReleases = async () => {
     try {
-      const response = await invoke<string>("obtener_home", { continuation: null });
-      const parsed = JSON.parse(response);
-      const sections = Array.isArray(parsed) ? parsed : (parsed.sections || []);
-      const newReleasesSection = sections.find((s: any) => 
-        s.title?.toLowerCase().includes("new releases") || 
-        s.title?.toLowerCase().includes("novedades") ||
-        s.title?.toLowerCase().includes("lanzamientos")
-      );
-      if (newReleasesSection && newReleasesSection.items?.length > 0) {
-        setNewReleases(newReleasesSection.items.map(convertYTItemToTrack));
+      const response = await invoke<string>("obtener_nuevos_lanzamientos");
+      const data = JSON.parse(response);
+      const items = Array.isArray(data) ? data : [];
+      if (items.length > 0) {
+        setNewReleases(items.map(convertYTItemToTrack));
       } else {
         const searchRes = await invoke<string>("buscar_cancion", { query: "new music releases" });
         const parsedSearch = JSON.parse(searchRes);
@@ -1445,8 +1455,10 @@ function App() {
     setCurrentLyricIndex(-1);
     try {
       const response = await invoke<string>("obtener_letras", {
+        id: track.id,
         artist: track.artist,
         title: track.title,
+        album: track.album || null,
         duration: Math.round(track.duration)
       });
       const parsed = JSON.parse(response);
@@ -1463,7 +1475,8 @@ function App() {
             const min = parseInt(match[1]);
             const sec = parseInt(match[2]);
             const ms = match[3] ? parseInt(match[3]) : 0;
-            const time = min * 60 + sec + ms / 100;
+            const divisor = Math.pow(10, match[3]?.length ?? 2);
+            const time = min * 60 + sec + ms / divisor;
             const rawText = line.replace(timeReg, "").trim();
             lrcLines.push({ time, text: rawText });
           } else {
@@ -1606,6 +1619,7 @@ function App() {
     };
     img.src = imageUrl;
   }, []);
+
 
 
 
@@ -2297,12 +2311,40 @@ function App() {
     return `${m}:${s}`;
   };
 
+  const lastTimeUpdateRef = useRef(0);
+
   const handleTimeUpdate = () => {
     if (audioRef.current) {
       const cur = audioRef.current.currentTime;
+      // Always keep the ref in sync so syncLyricsScroll gets exact time
+      currentTimeRef.current = cur;
       // Throttled state update to avoid rendering the 7000+ line App component 25 times per second
-      if (Math.abs(currentTimeRef.current - cur) > 1.2) {
+      if (Math.abs(lastTimeUpdateRef.current - cur) > 1.2) {
+        lastTimeUpdateRef.current = cur;
         setCurrentTime(cur);
+      }
+      // High-frequency lyrics sync (no state change unless line changes)
+      const curLyrics = parsedLyricsRef.current;
+      if (curLyrics.length > 0) {
+        const idx = curLyrics.findIndex((line, i) => {
+          const nextLine = curLyrics[i + 1];
+          return cur >= line.time && (!nextLine || cur < nextLine.time);
+        });
+        if (idx !== -1) {
+          setCurrentLyricIndex(idx);
+          if (lyricsScrollLocked && lyricsContainerRef.current) {
+            const activeEl = document.getElementById(`lyric-line-${idx}`);
+            if (activeEl) {
+              ignoreNextScrollRef.current = true;
+              if (autoScrollTimeoutRef.current) window.clearTimeout(autoScrollTimeoutRef.current);
+              autoScrollTimeoutRef.current = window.setTimeout(() => { ignoreNextScrollRef.current = false; }, 800);
+              lyricsContainerRef.current.scrollTo({
+                top: activeEl.offsetTop - lyricsContainerRef.current.clientHeight / 2 + activeEl.clientHeight / 2,
+                behavior: "smooth"
+              });
+            }
+          }
+        }
       }
       // Instant DOM updates for smooth UI
       const tMin = document.getElementById("player-time-min");
@@ -4461,16 +4503,6 @@ function App() {
                                   >
                                     <Play className="w-7 h-7 fill-current" />
                                   </button>
-                                  <button
-                                    onClick={() => downloadAllTracks(playlist.tracks)}
-                                    className="p-2.5 bg-white/5 hover:bg-white/10 text-white rounded-xl hover:scale-105 transition cursor-pointer group relative"
-                                    title="Descargar todo"
-                                  >
-                                    <Download className="w-4 h-4" />
-                                    <span className="absolute -bottom-7 left-1/2 -translate-x-1/2 text-[10px] font-semibold whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity bg-surface-dark px-2 py-0.5 rounded-md border border-white/10 shadow-lg pointer-events-none">
-                                      Descargar todo
-                                    </span>
-                                  </button>
                                 </>
                               )}
                               <button
@@ -4740,154 +4772,136 @@ function App() {
 
           {/* DEDICATED ALBUM/PLAYLIST VIEW */}
           {activeTab === "album_view" && currentAlbum && (
-            <div className="space-y-6 animate-fade-in">
-              <div className="flex items-center gap-2 mb-3">
-                <button
-                  onClick={() => { goBack(); }}
-                  disabled={navIndex === 0}
-                  className="p-2 bg-surface-dark border border-white/10 hover:border-white/20 disabled:opacity-40 disabled:hover:border-white/10 rounded-full transition text-text-secondary hover:text-white"
-                  title="Volver"
-                >
-                  <ChevronLeft className="w-5 h-5" />
-                </button>
-                <button
-                  onClick={goForward}
-                  disabled={navIndex === navHistory.length - 1}
-                  className="p-2 bg-surface-dark border border-white/10 hover:border-white/20 disabled:opacity-40 disabled:hover:border-white/10 rounded-full transition text-text-secondary hover:text-white"
-                  title="Adelante"
-                >
-                  <ChevronLeft className="w-5 h-5 rotate-180" />
-                </button>
-              </div>
-
-              <div className="flex flex-col lg:flex-row gap-8 items-start">
-                {/* Left Panel: Cover & Info */}
-                <div className="w-full lg:w-auto flex-shrink-0 lg:sticky lg:top-0 flex flex-col items-center lg:items-start text-center lg:text-left gap-4 bg-surface-dark/20 p-6 rounded-2xl border border-white/5 shadow-xl">
-                  <SafeImage src={currentAlbum.thumbnail} alt={currentAlbum.title} className="w-44 h-44 lg:w-56 lg:h-56 rounded-2xl object-cover shadow-2xl border border-white/10" />
-                  <div className="w-full min-w-0">
-                    <p className="text-xs text-brand-primary uppercase font-bold tracking-wider mb-1">
-                      {currentAlbum.type === "album" ? "Álbum" : "Lista de Reproducción"}
-                    </p>
-                    <h2 className="text-2xl font-extrabold tracking-tight mb-2 text-white break-words">{currentAlbum.title}</h2>
-                    {currentAlbum.artist && (
-                      <p className="text-sm text-text-secondary">De <span className="text-white font-semibold">{currentAlbum.artist}</span></p>
+            <div className="flex flex-col lg:flex-row gap-8 items-start animate-fade-in">
+              {/* Left Panel: Cover & Info */}
+              <div className="w-full lg:w-auto flex-shrink-0 lg:sticky lg:top-0 flex flex-col items-center gap-3">
+                <div className="flex items-center gap-2 self-start">
+                  <button
+                    onClick={goBack}
+                    disabled={navIndex === 0}
+                    className="text-text-secondary hover:text-white transition cursor-pointer"
+                    title="Volver"
+                  >
+                    <ChevronLeft className="w-5 h-5" />
+                  </button>
+                </div>
+                <div className="w-44 h-44 lg:w-56 lg:h-56 rounded-2xl overflow-hidden shadow-2xl border border-white/10 bg-surface-dark flex items-center justify-center">
+                  <SafeImage src={currentAlbum.thumbnail} alt={currentAlbum.title} className="w-full h-full object-cover" />
+                </div>
+                <div className="w-full min-w-0 text-center">
+                  <p className="text-xs text-brand-primary uppercase font-bold tracking-wider mb-1">
+                    {currentAlbum.type === "album" ? "Álbum" : "Lista de Reproducción"}
+                  </p>
+                  <h2 className="text-2xl font-extrabold tracking-tight mb-0.5 text-white break-words">{currentAlbum.title}</h2>
+                  {currentAlbum.artist && (
+                    <p className="text-xs text-text-secondary mt-0.5">De <span className="text-white font-semibold">{currentAlbum.artist}</span></p>
+                  )}
+                  <p className="text-xs text-text-secondary mt-1">{currentAlbumTracks.length} canciones</p>
+                  
+                  <div className="flex items-center justify-center gap-2 mt-4 w-full">
+                    {currentAlbumTracks.length > 0 && (
+                      <>
+                        <button 
+                          onClick={() => playShuffleQueue(currentAlbumTracks)}
+                          className="p-2.5 bg-white/5 hover:bg-white/10 text-white rounded-xl hover:scale-105 transition cursor-pointer group relative"
+                          title="Aleatorio"
+                        >
+                          <Shuffle className="w-4 h-4" />
+                          <span className="absolute -bottom-7 left-1/2 -translate-x-1/2 text-[10px] font-semibold whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity bg-surface-dark px-2 py-0.5 rounded-md border border-white/10 shadow-lg pointer-events-none">
+                            Aleatorio
+                          </span>
+                        </button>
+                        <button
+                          onClick={() => playTrack(currentAlbumTracks[0], currentAlbumTracks)}
+                          className="w-14 h-14 rounded-full bg-brand-primary text-bg-dark flex items-center justify-center hover:scale-105 transition cursor-pointer shadow-lg"
+                          title="Reproducir"
+                        >
+                          <Play className="w-7 h-7 fill-current" />
+                        </button>
+                        <button 
+                          onClick={(e) => openAlbumOrPlaylistContextMenu(e, currentAlbum)}
+                          className="p-2.5 bg-white/5 hover:bg-white/10 text-white rounded-xl hover:scale-105 transition flex items-center justify-center cursor-pointer group relative"
+                          title="Más opciones"
+                        >
+                          <MoreVertical className="w-4 h-4" />
+                          <span className="absolute -bottom-7 left-1/2 -translate-x-1/2 text-[10px] font-semibold whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity bg-surface-dark px-2 py-0.5 rounded-md border border-white/10 shadow-lg pointer-events-none">
+                            Más opciones
+                          </span>
+                        </button>
+                      </>
                     )}
-                    <p className="text-xs text-text-secondary mt-1">{currentAlbumTracks.length} canciones</p>
-                    
-                    <div className="flex flex-wrap gap-2 justify-center lg:justify-start mt-5 w-full">
-                      {currentAlbumTracks.length > 0 && (
-                        <>
-                          <button 
-                            onClick={() => playTrack(currentAlbumTracks[0], currentAlbumTracks)}
-                            className="flex-1 min-w-[120px] px-4 py-2.5 bg-brand-primary text-bg-dark rounded-xl font-bold text-xs hover:scale-105 transition flex items-center justify-center gap-1.5 cursor-pointer"
-                          >
-                            <Play className="w-4 h-4 fill-current" /> Reproducir
-                          </button>
-                          <button 
-                            onClick={() => playShuffleQueue(currentAlbumTracks)}
-                            className="p-2.5 bg-white/5 hover:bg-white/10 text-white rounded-xl hover:scale-105 transition cursor-pointer group relative"
-                            title="Aleatorio"
-                          >
-                            <Shuffle className="w-4 h-4" />
-                            <span className="absolute -bottom-7 left-1/2 -translate-x-1/2 text-[10px] font-semibold whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity bg-surface-dark px-2 py-0.5 rounded-md border border-white/10 shadow-lg pointer-events-none">
-                              Aleatorio
-                            </span>
-                          </button>
-                          <button 
-                            onClick={() => downloadAllTracks(currentAlbumTracks)}
-                            className="p-2.5 bg-white/5 hover:bg-white/10 text-white rounded-xl hover:scale-105 transition cursor-pointer group relative"
-                            title="Descargar todo"
-                          >
-                            <Download className="w-4 h-4" />
-                            <span className="absolute -bottom-7 left-1/2 -translate-x-1/2 text-[10px] font-semibold whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity bg-surface-dark px-2 py-0.5 rounded-md border border-white/10 shadow-lg pointer-events-none">
-                              Descargar todo
-                            </span>
-                          </button>
-                          <button 
-                            onClick={(e) => openAlbumOrPlaylistContextMenu(e, currentAlbum)}
-                            className="p-2.5 bg-white/5 hover:bg-white/10 text-white rounded-xl hover:scale-105 transition flex items-center justify-center cursor-pointer group relative"
-                            title="Más opciones"
-                          >
-                            <MoreVertical className="w-4 h-4" />
-                            <span className="absolute -bottom-7 left-1/2 -translate-x-1/2 text-[10px] font-semibold whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity bg-surface-dark px-2 py-0.5 rounded-md border border-white/10 shadow-lg pointer-events-none">
-                              Más opciones
-                            </span>
-                          </button>
-                        </>
-                      )}
-                    </div>
                   </div>
                 </div>
+              </div>
 
-                {/* Right Panel: Tracks list */}
-                <div className="flex-1 min-w-0 max-w-3xl w-full">
-                  {currentAlbumTracks.length > 0 ? (
-                    <div className="flex flex-col gap-2 w-full">
-                      {currentAlbumTracks.map((track, idx) => (
-                        <div
-                          key={track.id}
-                          onContextMenu={(e) => openContextMenu(e, track.id)}
-                          className={`flex items-center gap-4 p-3 rounded-xl transition duration-200 bg-surface-dark/30 hover:bg-surface-dark/70 border border-white/5 cursor-pointer group ${
-                            currentTrack?.id === track.id ? "bg-brand-primary/10 border-brand-primary/20" : "border-transparent"
-                          }`}
-                          onClick={() => {
-                            if (currentTrack?.id === track.id) {
-                              setIsPlayerExpanded(true);
-                            } else {
-                              playTrack(track, currentAlbumTracks);
-                            }
-                          }}
-                        >
-                          <span className="text-xs text-text-secondary w-5 text-right font-medium">{idx + 1}</span>
-                          <SafeImage trackId={track.id} src={track.thumbnail} className="w-11 h-11 rounded-lg object-cover shadow-md flex-shrink-0" alt={track.title} />
-                          <div className="min-w-0 flex-1">
-                            <p className={`font-semibold text-sm truncate ${currentTrack?.id === track.id ? "text-brand-primary" : "text-text-primary"}`}>{track.title}</p>
-                            <div className="flex items-center gap-1.5 min-w-0 mt-0.5">
-                              <p className="text-xs text-text-secondary truncate">{track.artist}</p>
-                              {downloads[track.id] && (
-                                <span className="flex-shrink-0 text-brand-primary" title="Descargado localmente">
-                                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9" fill="currentColor"/><path d="M12 7v8M12 15l-3-3M12 15l3-3" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none" className="text-bg-dark"/></svg>
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          <span className="text-xs text-text-secondary hidden sm:block w-16 text-right mr-2">{formatTime(track.duration)}</span>
-                          <div className="flex items-center gap-2">
-                            <button 
-                              onClick={(e) => { 
-                                e.stopPropagation(); 
-                                if (currentTrack?.id === track.id) {
-                                  togglePlay();
-                                } else {
-                                  playTrack(track, currentAlbumTracks);
-                                }
-                              }} 
-                              className="p-2 bg-brand-primary text-bg-dark rounded-full opacity-0 group-hover:opacity-100 transition shadow hover:scale-105"
-                            >
-                              {currentTrack?.id === track.id && isPlaying ? (
-                                <Pause className="w-3.5 h-3.5 fill-current" />
-                              ) : (
-                                <Play className="w-3.5 h-3.5 fill-current" />
-                              )}
-                            </button>
-                            <button 
-                              onClick={(e) => { e.stopPropagation(); openContextMenu(e, track.id); }} 
-                              className="p-2 text-text-secondary hover:text-brand-primary transition rounded-lg"
-                            >
-                              <MoreVertical className="w-4 h-4" />
-                            </button>
+              {/* Right Panel: Tracks list */}
+              <div className="flex-1 min-w-0 w-full">
+                {currentAlbumTracks.length > 0 ? (
+                  <div className="flex flex-col gap-2 w-full">
+                    {currentAlbumTracks.map((track, idx) => (
+                      <div
+                        key={track.id}
+                        onContextMenu={(e) => openContextMenu(e, track.id)}
+                        className={`flex items-center gap-4 p-3 rounded-xl transition duration-200 bg-surface-dark/30 hover:bg-surface-dark/70 border border-white/5 cursor-pointer group ${
+                          currentTrack?.id === track.id ? "bg-brand-primary/10 border-brand-primary/20" : "border-transparent"
+                        }`}
+                        onClick={() => {
+                          if (currentTrack?.id === track.id) {
+                            setIsPlayerExpanded(true);
+                          } else {
+                            playTrack(track, currentAlbumTracks);
+                          }
+                        }}
+                      >
+                        <span className="text-xs text-text-secondary w-5 text-right font-medium">{idx + 1}</span>
+                        <SafeImage trackId={track.id} src={track.thumbnail} className="w-11 h-11 rounded-lg object-cover shadow-md flex-shrink-0" alt={track.title} />
+                        <div className="min-w-0 flex-1">
+                          <p className={`font-semibold text-sm truncate ${currentTrack?.id === track.id ? "text-brand-primary" : "text-text-primary"}`}>{track.title}</p>
+                          <div className="flex items-center gap-1.5 min-w-0 mt-0.5">
+                            <p className="text-xs text-text-secondary truncate">{track.artist}</p>
+                            {downloads[track.id] && (
+                              <span className="flex-shrink-0 text-brand-primary" title="Descargado localmente">
+                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9" fill="currentColor"/><path d="M12 7v8M12 15l-3-3M12 15l3-3" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none" className="text-bg-dark"/></svg>
+                              </span>
+                            )}
                           </div>
                         </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="flex flex-col gap-2 w-full">
-                      {[1, 2, 3, 4, 5, 6].map((i) => (
-                        <SkeletonRow key={i} />
-                      ))}
-                    </div>
-                  )}
-                </div>
+                        <span className="text-xs text-text-secondary hidden sm:block w-16 text-right mr-2">{formatTime(track.duration)}</span>
+                        <div className="flex items-center gap-2">
+                          <button 
+                            onClick={(e) => { 
+                              e.stopPropagation(); 
+                              if (currentTrack?.id === track.id) {
+                                togglePlay();
+                              } else {
+                                playTrack(track, currentAlbumTracks);
+                              }
+                            }} 
+                            className="p-2 bg-brand-primary text-bg-dark rounded-full opacity-0 group-hover:opacity-100 transition shadow hover:scale-105"
+                          >
+                            {currentTrack?.id === track.id && isPlaying ? (
+                              <Pause className="w-3.5 h-3.5 fill-current" />
+                            ) : (
+                              <Play className="w-3.5 h-3.5 fill-current" />
+                            )}
+                          </button>
+                          <button 
+                            onClick={(e) => { e.stopPropagation(); openContextMenu(e, track.id); }} 
+                            className="p-2 text-text-secondary hover:text-brand-primary transition rounded-lg"
+                          >
+                            <MoreVertical className="w-4 h-4" />
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="flex flex-col gap-2 w-full">
+                    {[1, 2, 3, 4, 5, 6].map((i) => (
+                      <SkeletonRow key={i} />
+                    ))}
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -6050,6 +6064,7 @@ function App() {
                             { keys: ["↑"], desc: "Subir volumen" },
                             { keys: ["↓"], desc: "Bajar volumen" },
                             { keys: ["Espacio"], desc: "Reproducir / pausar" },
+                            { keys: ["0-9"], desc: "Saltar a % (reproductor expandido)" },
                           ].map((shortcut, i) => (
                             <div key={i} className="flex items-center justify-between">
                               <span className="text-xs text-text-secondary">{shortcut.desc}</span>
@@ -6141,21 +6156,20 @@ function App() {
                       key={release.id}
                       onClick={() => playTrack(release, newReleases)}
                       onContextMenu={(e) => openContextMenu(e, release.id)}
-                      className="p-4 bg-surface-dark/40 hover:bg-surface-dark rounded-2xl border border-white/5 transition duration-300 group flex flex-col justify-between cursor-pointer"
+                      className="flex flex-col group cursor-pointer"
                     >
-                      <div>
-                        <div className="relative aspect-square rounded-xl overflow-hidden mb-3 bg-black/20 shadow-md">
-                          <SafeImage src={release.thumbnail} alt={release.title} className="w-full h-full object-cover group-hover:scale-105 transition duration-300" />
-                          <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition">
-                            <Play className="w-8 h-8 text-brand-primary fill-current" />
-                          </div>
+                      <div className="relative aspect-square w-full rounded-xl overflow-hidden mb-2 bg-black/20">
+                        <SafeImage src={release.thumbnail} alt={release.title} className="w-full h-full object-cover group-hover:scale-105 transition duration-300" />
+                        <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition">
+                          <button className="p-3 bg-brand-primary rounded-full hover:scale-105 transition shadow-lg">
+                            <Play className="w-6 h-6 text-black fill-current" />
+                          </button>
                         </div>
-                        <h4 className="font-bold text-sm truncate text-white">{release.title}</h4>
-                        <p className="text-xs text-text-secondary truncate mt-0.5">{release.artist}</p>
                       </div>
-                      <p className="text-[10px] text-brand-primary font-semibold mt-3 uppercase tracking-wider">
-                        {release.album ? release.album : "Lanzamiento"}
-                      </p>
+                      <div className="min-w-0 px-1">
+                        <p className="font-semibold text-sm truncate text-white">{release.title}</p>
+                        <p className="text-xs text-text-secondary truncate">{release.artist}{release.album ? ` • ${release.album}` : ""}</p>
+                      </div>
                     </div>
                   ))
                 ) : (
@@ -6949,6 +6963,14 @@ function App() {
                   className="w-full text-left px-3 py-2.5 text-sm hover:bg-brand-primary hover:text-bg-dark rounded-xl transition flex items-center gap-3"
                 >
                   <Shuffle className="w-4 h-4" /> Reproducción aleatoria
+                </button>
+              )}
+              {contextMenuPlaylist.tracks.length > 0 && (
+                <button 
+                  onClick={() => { addTracksToQueue(contextMenuPlaylist.tracks); setContextMenuPlaylist(null); }}
+                  className="w-full text-left px-3 py-2.5 text-sm hover:bg-brand-primary hover:text-bg-dark rounded-xl transition flex items-center gap-3"
+                >
+                  <ListPlus className="w-4 h-4" /> Agregar a la cola
                 </button>
               )}
               {contextMenuPlaylist.tracks.length > 0 && (

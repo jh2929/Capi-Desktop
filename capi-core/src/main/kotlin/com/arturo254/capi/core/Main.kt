@@ -4,6 +4,7 @@ import com.arturo254.opentune.innertube.YouTube
 import com.arturo254.opentune.innertube.YouTube.SearchFilter
 import com.arturo254.opentune.innertube.models.YouTubeClient
 import com.arturo254.opentune.innertube.models.SongItem
+import com.arturo254.opentune.innertube.models.WatchEndpoint
 import com.arturo254.opentune.innertube.NewPipeUtils
 import com.arturo254.opentune.lrclib.LrcLib
 import com.arturo254.opentune.innertube.pages.HomePage
@@ -11,13 +12,26 @@ import com.arturo254.opentune.innertube.pages.ArtistPage
 import com.arturo254.opentune.innertube.pages.ExplorePage
 import com.arturo254.opentune.innertube.pages.MoodAndGenres
 import com.arturo254.opentune.innertube.utils.PoTokenGenerator
+import io.ktor.client.HttpClient
+import io.ktor.client.call.body
+import io.ktor.client.plugins.HttpTimeout
+import io.ktor.client.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.client.request.get
+import io.ktor.client.request.parameter
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
+import io.ktor.serialization.kotlinx.json.json
 import kotlinx.coroutines.*
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlin.io.encoding.Base64
+import kotlin.io.encoding.ExperimentalEncodingApi
 import kotlin.system.exitProcess
 
 @Serializable
@@ -45,6 +59,12 @@ data class LyricsDTO(
 @Serializable
 data class ErrorDTO(
     val error: String
+)
+
+@Serializable
+data class LyricsResultDTO(
+    val lyrics: String?,
+    val provider: String? = null
 )
 
 @Serializable
@@ -108,6 +128,112 @@ data class MoodGenreDTO(
     val browseId: String,
     val params: String?
 )
+
+// --- Inline provider models ---
+@Serializable
+data class KugouSearchSongResponse(
+    val status: Int, val errcode: Int, val error: String, val data: KugouSearchSongData
+)
+@Serializable data class KugouSearchSongData(val info: List<KugouSongInfo>)
+@Serializable data class KugouSongInfo(val duration: Int, val hash: String)
+
+@Serializable
+data class KugouSearchLyricsResponse(
+    val status: Int, val info: String, val errcode: Int, val errmsg: String,
+    val expire: Int, val candidates: List<KugouCandidate>
+)
+@Serializable data class KugouCandidate(
+    val id: Long, @SerialName("product_from") val productFrom: String,
+    val duration: Long, val accesskey: String
+)
+@Serializable data class KugouDownloadLyricsResponse(val content: String)
+
+@Serializable
+data class SimpMusicResponse(val type: String? = null, val data: List<SimpMusicTrack> = emptyList()) {
+    val success: Boolean get() = type == "success"
+}
+@Serializable data class SimpMusicTrack(
+    val syncedLyrics: String? = null, @SerialName("plainLyric") val plainLyrics: String? = null,
+    @SerialName("durationSeconds") val duration: Int? = null
+)
+
+@OptIn(ExperimentalEncodingApi::class)
+private val httpClient = HttpClient {
+    expectSuccess = true
+    install(ContentNegotiation) {
+        val json = Json { ignoreUnknownKeys = true; isLenient = true; coerceInputValues = true }
+        json(json); json(json, ContentType.Text.Html); json(json, ContentType.Text.Plain)
+    }
+    install(HttpTimeout) { requestTimeoutMillis = 15000; connectTimeoutMillis = 10000; socketTimeoutMillis = 15000 }
+}
+
+@OptIn(ExperimentalEncodingApi::class)
+private suspend fun kugouGetLyrics(title: String, artist: String, duration: Int): Result<String> = runCatching {
+    val cleanTitle = title.replace(Regex("\\(.*\\)|（.*）|「.*」|『.*』|<.*>|《.*》|〈.*〉|＜.*＞"), "")
+    val cleanArtist = artist.replace(", ", "、").replace(" & ", "、").replace(".", "").replace("和", "、")
+        .replace(Regex("\\(.*\\)|（.*）"), "")
+    val keyword = "${cleanTitle} - ${cleanArtist}"
+
+    suspend fun findCandidate(): KugouCandidate? {
+        val songs = httpClient.get("https://mobileservice.kugou.com/api/v3/search/song") {
+            parameter("version", 9108); parameter("plat", 0); parameter("pagesize", 8); parameter("showtype", 0)
+            parameter("keyword", keyword)
+        }.body<KugouSearchSongResponse>()
+        for (song in songs.data.info) {
+            if (duration == -1 || kotlin.math.abs(song.duration - duration) <= 8) {
+                val candidate = httpClient.get("https://lyrics.kugou.com/search") {
+                    parameter("ver", 1); parameter("man", "yes"); parameter("client", "pc"); parameter("hash", song.hash)
+                }.body<KugouSearchLyricsResponse>().candidates.firstOrNull()
+                if (candidate != null) return candidate
+            }
+        }
+        return httpClient.get("https://lyrics.kugou.com/search") {
+            parameter("ver", 1); parameter("man", "yes"); parameter("client", "pc")
+            if (duration != -1) parameter("duration", duration * 1000)
+            parameter("keyword", keyword)
+        }.body<KugouSearchLyricsResponse>().candidates.firstOrNull()
+    }
+
+    val candidate = findCandidate() ?: throw IllegalStateException("No lyrics candidate")
+    val content = httpClient.get("https://lyrics.kugou.com/download") {
+        parameter("fmt", "lrc"); parameter("charset", "utf8"); parameter("client", "pc"); parameter("ver", 1)
+        parameter("id", candidate.id); parameter("accesskey", candidate.accesskey)
+    }.body<KugouDownloadLyricsResponse>().content
+
+    Base64.Default.decode(content).decodeToString()
+        .replace("&apos;", "'")
+        .lines().filter { it.matches(Regex("\\[(\\d\\d):(\\d\\d)\\.(\\d{2,3})\\].*")) }
+        .let { lines ->
+            val head = (0..minOf(30, lines.lastIndex)).reversed().firstOrNull { lines[it].matches(Regex(".+].+[:：].+")) }?.let { it + 1 } ?: 0
+            val tail = (0..minOf(lines.size - 30, lines.lastIndex)).reversed().firstOrNull { lines[lines.lastIndex - it].matches(Regex(".+].+[:：].+")) }?.let { it + 1 } ?: 0
+            lines.drop(head).dropLast(tail).joinToString("\n")
+        }
+}
+
+private suspend fun simpmusicGetLyrics(videoId: String, duration: Int): Result<String> = runCatching {
+    val response = httpClient.get("https://api-lyrics.simpmusic.org/v1/$videoId") {
+    }.body<SimpMusicResponse>()
+    if (!response.success || response.data.isEmpty()) throw IllegalStateException("Lyrics unavailable")
+    val best = if (duration > 0 && response.data.size > 1)
+        response.data.minByOrNull { kotlin.math.abs((it.duration ?: 0) - duration) }
+    else response.data.first()
+    best?.syncedLyrics ?: best?.plainLyrics ?: throw IllegalStateException("Lyrics unavailable")
+}
+
+private suspend fun betterlyricsGetLyrics(title: String, artist: String, album: String?, durationSeconds: Int): Result<String> = runCatching {
+    require(title.isNotBlank() && artist.isNotBlank()) { "Song title and artist are required" }
+    val responseText = httpClient.get("https://lyrics-api.boidu.dev/getLyrics") {
+        parameter("s", title.trim()); parameter("a", artist.trim())
+        if (!album.isNullOrBlank()) parameter("al", album.trim())
+        if (durationSeconds > 0) parameter("d", durationSeconds)
+    }.bodyAsText()
+    val ttml = if (responseText.isNotBlank()) {
+        val obj = Json.parseToJsonElement(responseText).jsonObject
+        obj["ttml"]?.jsonPrimitive?.contentOrNull ?: obj["lyrics"]?.jsonPrimitive?.contentOrNull ?: ""
+    } else ""
+    if (ttml.isBlank()) throw IllegalStateException("Lyrics unavailable")
+    ttml
+}
 
 fun mapYTItem(item: com.arturo254.opentune.innertube.models.YTItem): YTItemDTO {
     return when (item) {
@@ -209,7 +335,16 @@ fun main(args: Array<String>) {
         ArtistPageDTO.serializer(),
         ArtistSectionDTO.serializer(),
         ExploreResponseDTO.serializer(),
-        MoodGenreDTO.serializer()
+        MoodGenreDTO.serializer(),
+        LyricsResultDTO.serializer(),
+        KugouSearchSongResponse.serializer(),
+        KugouSearchSongData.serializer(),
+        KugouSongInfo.serializer(),
+        KugouSearchLyricsResponse.serializer(),
+        KugouCandidate.serializer(),
+        KugouDownloadLyricsResponse.serializer(),
+        SimpMusicResponse.serializer(),
+        SimpMusicTrack.serializer()
     )
     if (System.getenv("OPENTUNE_DEBUG") != null) {
         activeSerializers.forEach { println(it.descriptor.serialName) }
@@ -396,11 +531,75 @@ fun main(args: Array<String>) {
                                 }
                             }
                             "lyrics" -> {
+                                val id = cmdObj["id"]?.jsonPrimitive?.contentOrNull.orEmpty()
                                 val artist = cmdObj["artist"]?.jsonPrimitive?.contentOrNull.orEmpty()
                                 val title = cmdObj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                                val album = cmdObj["album"]?.jsonPrimitive?.contentOrNull
                                 val duration = cmdObj["duration"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: -1
-                                val lyrics = LrcLib.getLyrics(title, artist, duration).getOrNull()
-                                Json.encodeToString(LyricsDTO(lyrics))
+
+                                val result = supervisorScope {
+                                    val deferreds = listOf(
+                                        async(Dispatchers.IO) {
+                                            runCatching {
+                                                val nextResult = YouTube.next(WatchEndpoint(videoId = id)).getOrThrow()
+                                                val lyricsEndpoint = nextResult.lyricsEndpoint ?: throw IllegalStateException("No lyrics endpoint")
+                                                YouTube.lyrics(endpoint = lyricsEndpoint).getOrThrow() ?: throw IllegalStateException("Lyrics unavailable")
+                                            }.getOrNull()?.let { "YouTube Music" to it }
+                                        },
+                                        async(Dispatchers.IO) {
+                                            runCatching { YouTube.transcript(id).getOrThrow() }.getOrNull()?.let { "YouTube Subtitle" to it }
+                                        },
+                                        async(Dispatchers.IO) {
+                                            LrcLib.getLyrics(title, artist, duration).getOrNull()?.let { "LrcLib" to it }
+                                        },
+                                        async(Dispatchers.IO) {
+                                            kugouGetLyrics(title, artist, duration).getOrNull()?.let { "KuGou" to it }
+                                        },
+                                        async(Dispatchers.IO) {
+                                            simpmusicGetLyrics(videoId = id, duration = duration).getOrNull()?.let { "SimpMusic" to it }
+                                        },
+                                        async(Dispatchers.IO) {
+                                            betterlyricsGetLyrics(title = title, artist = artist, album = album, durationSeconds = duration).getOrNull()?.let { raw ->
+                                                "BetterLyrics" to normalizeLyrics(raw)
+                                            }
+                                        }
+                                    )
+
+                                    val channel = kotlinx.coroutines.channels.Channel<Pair<String, String>>(1)
+                                    var activeJobs = deferreds.size
+                                    deferreds.forEach { deferred ->
+                                        launch {
+                                            try {
+                                                val res = deferred.await()
+                                                if (res != null) {
+                                                    channel.trySend(res)
+                                                }
+                                            } finally {
+                                                activeJobs--
+                                                if (activeJobs == 0) {
+                                                    channel.close()
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    val firstResult = withTimeoutOrNull(8000) {
+                                        channel.receiveCatching().getOrNull()
+                                    }
+                                    deferreds.forEach { it.cancel() }
+                                    firstResult
+                                }
+
+                                if (result != null) {
+                                    Json.encodeToString(LyricsResultDTO(result.second, result.first))
+                                } else {
+                                    Json.encodeToString(LyricsResultDTO(null))
+                                }
+                            }
+                            "new-releases" -> {
+                                val albums = YouTube.newReleaseAlbums().getOrThrow()
+                                val items = albums.map { mapYTItem(it) }
+                                Json.encodeToString(items)
                             }
                             "home" -> {
                                 val continuation = cmdObj["continuation"]?.jsonPrimitive?.contentOrNull
@@ -748,5 +947,26 @@ fun main(args: Array<String>) {
 
 fun printError(message: String) {
     println(Json.encodeToString(ErrorDTO(message)))
+}
+
+// Convert TTML/XML lyrics to standard LRC format [mm:ss.xx]text
+fun normalizeLyrics(text: String): String {
+    if (text.startsWith("<?xml") || text.startsWith("<tt", true)) {
+        val result = StringBuilder()
+        val pRegex = Regex("<p[^>]*begin=\"([^\"]+)\"[^>]*>(.*?)</p>", RegexOption.DOT_MATCHES_ALL)
+        for (match in pRegex.findAll(text)) {
+            val begin = match.groupValues[1]
+            val content = match.groupValues[2].replace(Regex("<[^>]+>"), "").replace("&amp;", "&").trim()
+            if (content.isNotEmpty()) {
+                val parts = begin.split(":")
+                val totalSec = if (parts.size == 2) parts[0].toDouble() * 60 + parts[1].toDouble()
+                    else begin.toDoubleOrNull() ?: 0.0
+                val min = (totalSec / 60).toInt(); val sec = (totalSec % 60).toInt(); val ms = ((totalSec - totalSec.toInt()) * 100).toInt()
+                result.appendLine("[%02d:%02d.%02d]%s".format(min, sec, ms, content))
+            }
+        }
+        if (result.isNotEmpty()) return result.toString()
+    }
+    return text.replace(Regex("<[^>]+>"), "").replace("&amp;", "&")
 }
 

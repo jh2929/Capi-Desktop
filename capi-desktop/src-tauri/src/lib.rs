@@ -779,11 +779,13 @@ async fn obtener_explorar(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<Da
 }
 
 #[tauri::command]
-async fn obtener_letras(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<DaemonProcess>>, child: tauri::State<'_, Arc<Mutex<std::process::Child>>>, artist: String, title: String, duration: i32) -> Result<String, String> {
+async fn obtener_letras(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<DaemonProcess>>, child: tauri::State<'_, Arc<Mutex<std::process::Child>>>, id: String, artist: String, title: String, album: Option<String>, duration: i32) -> Result<String, String> {
     let cmd = serde_json::json!({
         "action": "lyrics",
+        "id": id,
         "artist": artist,
         "title": title,
+        "album": album,
         "duration": duration
     }).to_string();
     let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
@@ -794,9 +796,31 @@ async fn obtener_letras(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<Daem
             let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
             let cmd2 = serde_json::json!({
                 "action": "lyrics",
+                "id": id,
                 "artist": artist,
                 "title": title,
+                "album": album,
                 "duration": duration
+            }).to_string();
+            return send_daemon_command(new_daemon.inner().clone(), new_child.inner().clone(), cmd2).await;
+        }
+    }
+    result
+}
+
+#[tauri::command]
+async fn obtener_nuevos_lanzamientos(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<DaemonProcess>>, child: tauri::State<'_, Arc<Mutex<std::process::Child>>>) -> Result<String, String> {
+    let cmd = serde_json::json!({
+        "action": "new-releases"
+    }).to_string();
+    let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
+    if let Err(ref e) = result {
+        if e == "El daemon dejó de responder" {
+            restart_daemon(&app)?;
+            let new_daemon = app.state::<Arc<DaemonProcess>>();
+            let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
+            let cmd2 = serde_json::json!({
+                "action": "new-releases"
             }).to_string();
             return send_daemon_command(new_daemon.inner().clone(), new_child.inner().clone(), cmd2).await;
         }
@@ -1525,6 +1549,7 @@ pub fn run() {
             obtener_artista,
             obtener_explorar,
             obtener_letras,
+            obtener_nuevos_lanzamientos,
             obtener_sugerencias,
             obtener_local_port,
             discord_connect,
