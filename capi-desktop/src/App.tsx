@@ -1467,9 +1467,8 @@ function App() {
         setLyricsText(text);
         const lines = text.split("\n");
         const lrcLines: LyricLine[] = [];
-        const timeReg = /\[(\d+):(\d+)(?:\.(\d+))?\]/g;
         lines.forEach((line: string) => {
-          timeReg.lastIndex = 0;
+          const timeReg = /\[(\d+):(\d+)(?:\.(\d+))?\]/;
           const match = timeReg.exec(line);
           if (match) {
             const min = parseInt(match[1]);
