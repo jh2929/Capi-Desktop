@@ -2963,7 +2963,7 @@ function App() {
       {/* Sidebar Navigation */}
       <aside
         style={isPlayerExpanded && extractedColors ? { background: `linear-gradient(180deg, ${extractedColors.primary}55 0%, ${extractedColors.tertiary}20 100%)`, borderRightColor: `${extractedColors.primary}45` } : {}}
-        className={`${sidebarCollapsed ? "w-[72px]" : "w-64"} ${activeTab === "artist" && (!isPlayerExpanded || !extractedColors) ? (artistScrolled ? "bg-[#030303]" : "bg-transparent") : !isPlayerExpanded || !extractedColors ? (sidebarCollapsed ? "bg-bg-dark" : "glass") : ""} flex flex-col justify-between transition-all duration-300 z-20 ${
+        className={`${sidebarCollapsed ? "w-[72px]" : "w-64"} ${activeTab === "artist" && (!isPlayerExpanded || !extractedColors) ? (artistScrolled ? "bg-[#030303]" : "bg-transparent") : !isPlayerExpanded || !extractedColors ? "bg-bg-dark" : ""} flex flex-col justify-between transition-all duration-300 z-20 ${
         scrolled ? "border-r border-white/5" : "border-r border-transparent"
       }`}>
         <div className="p-4">
