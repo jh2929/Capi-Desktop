@@ -905,6 +905,31 @@ function App() {
   useEffect(() => { localStorage.setItem("capi_search_history", JSON.stringify(searchHistory)); }, [searchHistory]);
   useEffect(() => { localStorage.setItem("capi_search_thumbnails", JSON.stringify(searchThumbnails)); }, [searchThumbnails]);
   useEffect(() => { localStorage.setItem("capi_show_sidebar_settings", String(showSidebarSettings)); }, [showSidebarSettings]);
+
+  // Backfill searchThumbnails from current tracks when search completes
+  useEffect(() => {
+    if (tracks.length > 0 && query.trim()) {
+      setSearchThumbnails(prev => {
+        if (prev[query.trim()]) return prev;
+        return { ...prev, [query.trim()]: tracks[0].thumbnail };
+      });
+    }
+  }, [tracks, query]);
+
+  // Backfill thumbnails for history items that have none, using favorites/downloadedMetadata
+  useEffect(() => {
+    const all = [...favorites, ...downloadedMetadata];
+    if (all.length === 0) return;
+    setSearchThumbnails(prev => {
+      const updated = { ...prev };
+      for (const q of searchHistory) {
+        if (updated[q]) continue;
+        const match = all.find(t => t.thumbnail === updated[q] || q.toLowerCase().includes(t.artist.toLowerCase()) || q.toLowerCase().includes(t.title.toLowerCase()));
+        if (match && match.thumbnail) updated[q] = match.thumbnail;
+      }
+      return updated;
+    });
+  }, [searchHistory, favorites, downloadedMetadata]);
   useEffect(() => { localStorage.setItem("capi_hidden_artists", JSON.stringify(hiddenArtists)); }, [hiddenArtists]);
   useEffect(() => {
     localStorage.setItem("capi_volume", String(volume));
