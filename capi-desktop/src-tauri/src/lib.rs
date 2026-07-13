@@ -596,33 +596,27 @@ async fn descargar_cancion(
         .connect_timeout(std::time::Duration::from_secs(8))
         .timeout(std::time::Duration::from_secs(30))
         .pool_idle_timeout(std::time::Duration::from_secs(20))
+        .tcp_nodelay(true)
         .build()
         .map_err(|e| format!("Error creando cliente HTTP: {}", e))?;
-    let res = client
+
+    let total_size = client
         .get(&url)
         .send()
         .await
-        .map_err(|e| format!("Error en la petición de descarga: {}", e))?;
-
-    let total_size = res
+        .map_err(|e| format!("Error en la petición de descarga: {}", e))?
         .content_length()
         .ok_or_else(|| "No se pudo obtener el tamaño total de la canción".to_string())?;
 
     let mut downloaded: u64 = 0;
-    let mut file = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&dest_path)
-        .map_err(|e| format!("No se pudo crear el archivo local: {}", e))?;
-
-    let client = reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-        .connect_timeout(std::time::Duration::from_secs(8))
-        .timeout(std::time::Duration::from_secs(30))
-        .pool_idle_timeout(std::time::Duration::from_secs(20))
-        .build()
-        .map_err(|e| format!("Error creando cliente HTTP: {}", e))?;
+    let mut file = std::io::BufWriter::with_capacity(64 * 1024,
+        std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&dest_path)
+            .map_err(|e| format!("No se pudo crear el archivo local: {}", e))?
+    );
 
     // Hardening: Retry loop up to 3 attempts with Range resumes
     let mut attempts = 0;
@@ -657,7 +651,7 @@ async fn descargar_cancion(
         while let Some(item) = stream.next().await {
             match item {
                 Ok(chunk) => {
-                    if let Err(e) = file.write_all(&chunk) {
+                    if let Err(e) = file.write_all(chunk.as_ref()) {
                         return Err(format!("Error escribiendo bytes en el disco: {}", e));
                     }
                     downloaded += chunk.len() as u64;
@@ -687,6 +681,9 @@ async fn descargar_cancion(
             break;
         }
     }
+
+    // Flush BufWriter before validation
+    file.flush().map_err(|e| format!("Error al sincronizar archivo: {}", e))?;
 
     // Validation post-download
     let metadata = std::fs::metadata(&dest_path)

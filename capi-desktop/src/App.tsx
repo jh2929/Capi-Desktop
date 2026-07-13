@@ -548,7 +548,17 @@ function App() {
   const [searchHistory, setSearchHistory] = useState<string[]>(() => {
     migrateKey("opentune_search_history", "capi_search_history");
     const saved = localStorage.getItem("capi_search_history");
-    return saved ? JSON.parse(saved) : [];
+    if (!saved) return [];
+    try {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed) && parsed.length > 0 && typeof parsed[0] === "object") {
+        return parsed.map((h: any) => h.query || "");
+      }
+      return Array.isArray(parsed) ? parsed : [];
+    } catch { return []; }
+  });
+  const [searchThumbnails, setSearchThumbnails] = useState<Record<string, string>>(() => {
+    try { return JSON.parse(localStorage.getItem("capi_search_thumbnails") || "{}"); } catch { return {}; }
   });
   const [showSearchDropdown, setShowSearchDropdown] = useState(false);
   const [searchFocused, setSearchFocused] = useState(false);
@@ -893,6 +903,7 @@ function App() {
   useEffect(() => { localStorage.setItem("capi_downloaded_metadata", JSON.stringify(downloadedMetadata)); }, [downloadedMetadata]);
   useEffect(() => { localStorage.setItem("capi_sidebar_collapsed", String(sidebarCollapsed)); }, [sidebarCollapsed]);
   useEffect(() => { localStorage.setItem("capi_search_history", JSON.stringify(searchHistory)); }, [searchHistory]);
+  useEffect(() => { localStorage.setItem("capi_search_thumbnails", JSON.stringify(searchThumbnails)); }, [searchThumbnails]);
   useEffect(() => { localStorage.setItem("capi_show_sidebar_settings", String(showSidebarSettings)); }, [showSidebarSettings]);
   useEffect(() => { localStorage.setItem("capi_hidden_artists", JSON.stringify(hiddenArtists)); }, [hiddenArtists]);
   useEffect(() => {
@@ -1198,22 +1209,22 @@ function App() {
     const card = getArtistCardFromResults();
     const firstTrack = tracks[0];
     if (card && firstTrack && firstTrack.artistId) {
+      setArtistCardData({
+        id: firstTrack.artistId!,
+        name: card.name,
+        thumbnail: getHighQualityThumbnail(card.thumbnail),
+        banner: ""
+      });
       invoke<string>("obtener_artista", { id: firstTrack.artistId }).then(res => {
         const data = JSON.parse(res);
-        setArtistCardData({
-          id: firstTrack.artistId!,
-          name: data.name || card.name,
-          thumbnail: getHighQualityThumbnail(data.thumbnail || card.thumbnail),
+        setArtistCardData(prev => prev ? {
+          ...prev,
+          name: data.name || prev.name,
+          thumbnail: getHighQualityThumbnail(data.thumbnail || prev.thumbnail),
           banner: getHighQualityThumbnail(data.thumbnail || "")
-        });
+        } : prev);
       }).catch(e => {
         console.error("Error fetching artist details for card:", e);
-        setArtistCardData({
-          id: firstTrack.artistId!,
-          name: card.name,
-          thumbnail: getHighQualityThumbnail(card.thumbnail),
-          banner: ""
-        });
       });
     } else {
       setArtistCardData(null);
@@ -2223,10 +2234,6 @@ function App() {
     navigateTo("buscar");
     setLoading(true);
     setShowSearchDropdown(false);
-    setSearchHistory(prev => {
-      const filtered = prev.filter(h => h !== searchQuery.trim());
-      return [searchQuery.trim(), ...filtered].slice(0, 15);
-    });
     try {
       const responseJson = await invoke<string>("buscar_cancion", { query: searchQuery });
       const data = JSON.parse(responseJson);
@@ -2247,6 +2254,14 @@ function App() {
       }
 
       setTracks(parsedTracks);
+
+      setSearchHistory(prev => {
+        const filtered = prev.filter(h => h !== searchQuery.trim());
+        return [searchQuery.trim(), ...filtered].slice(0, 15);
+      });
+      if (parsedTracks.length > 0) {
+        setSearchThumbnails(prev => ({ ...prev, [searchQuery.trim()]: parsedTracks[0].thumbnail }));
+      }
     } catch (error: any) {
       console.error("Search error:", error);
     } finally {
@@ -3127,6 +3142,7 @@ function App() {
                           onClick={(e) => {
                             e.stopPropagation();
                             setSearchHistory(prev => prev.filter(h => h !== item));
+                            setSearchThumbnails(prev => { const rest = { ...prev }; delete rest[item]; return rest; });
                           }}
                           className="p-1 text-text-secondary hover:text-red-400 transition"
                         >
@@ -3145,7 +3161,7 @@ function App() {
                         triggerConfirm(
                           "Vaciar Historial de Búsquedas",
                           "¿Estás seguro de que quieres eliminar todo el historial de búsquedas recientes?",
-                          () => setSearchHistory([])
+                          () => { setSearchHistory([]); setSearchThumbnails({}); }
                         );
                       }}
                       className="px-3 py-2 text-xs text-text-secondary hover:text-text-primary hover:bg-white/5 rounded-xl transition flex items-center gap-1.5 w-full justify-center"
@@ -3611,8 +3627,17 @@ function App() {
           {/* SEARCH VIEW */}
           {activeTab === "buscar" && (
             <div className="space-y-6 animate-fade-in">
-              <div className="flex justify-between items-center border-b border-white/5 pb-4">
-                <h2 className="text-2xl font-bold tracking-tight">Resultados de Búsqueda</h2>
+              <div className="flex items-center gap-3 border-b border-white/5 pb-4">
+                {tracks.length > 0 && (
+                  <button
+                    onClick={() => { setQuery(""); setTracks([]); setArtistCardData(null); }}
+                    className="text-text-secondary hover:text-white transition cursor-pointer flex-shrink-0"
+                    title="Volver"
+                  >
+                    <ChevronLeft className="w-5 h-5" />
+                  </button>
+                )}
+                <h2 className="text-2xl font-bold tracking-tight flex-1">{tracks.length > 0 ? "Resultados de Búsqueda" : "Buscar"}</h2>
                 <div className="flex gap-2 bg-white/5 p-1 rounded-xl">
                   <button
                     onClick={() => setSearchViewMode("grid")}
@@ -3760,8 +3785,63 @@ function App() {
                     ))}
                   </div>
                 )
-              ) : (
-                !loading && (
+              ) : !loading && (
+                query.trim() === "" && (searchHistory.length > 0 || favorites.length > 0) ? (
+                  <div className="animate-fade-in space-y-8">
+                    {searchHistory.length > 0 && (
+                      <div>
+                        <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wider mb-4">Últimas búsquedas</h3>
+                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
+                          {searchHistory.map((item, idx) => (
+                            <button
+                              key={idx}
+                              onClick={() => performSearchWithQuery(item)}
+                              className="group flex flex-col"
+                            >
+                              <div className="aspect-square rounded-xl overflow-hidden mb-2 bg-surface-dark/50 shadow-sm">
+                                {searchThumbnails[item] ? (
+                                  <SafeImage src={searchThumbnails[item]} alt={item} className="w-full h-full object-cover group-hover:scale-105 transition" />
+                                ) : (
+                                  <div
+                                    className="w-full h-full flex items-center justify-center"
+                                    style={{ background: `hsl(${item.split("").reduce((a, c) => a + c.charCodeAt(0), 0) % 360}, 30%, 20%)` }}
+                                  >
+                                    <Search className="w-8 h-8 text-white/20" />
+                                  </div>
+                                )}
+                              </div>
+                              <p className="font-semibold text-sm text-text-primary truncate text-center leading-tight">{item}</p>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    {favorites.length > 0 && (
+                      <div>
+                        <h3 className="text-sm font-semibold text-text-secondary uppercase tracking-wider mb-4">Recomendaciones</h3>
+                        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-3">
+                          {favorites.slice(0, 10).map((track) => (
+                            <div
+                              key={track.id}
+                              onClick={() => playTrack(track, favorites)}
+                              onContextMenu={(e) => openContextMenu(e, track.id)}
+                              className="group flex flex-col cursor-pointer"
+                            >
+                              <div className="relative aspect-square rounded-xl overflow-hidden mb-2 bg-black/40 shadow-sm">
+                                <SafeImage trackId={track.id} src={track.thumbnail} alt={track.title} className="w-full h-full object-cover group-hover:scale-105 transition" />
+                                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition flex items-center justify-center">
+                                  <Play className="w-8 h-8 text-white opacity-0 group-hover:opacity-100 transition" />
+                                </div>
+                              </div>
+                              <p className="font-semibold text-sm truncate text-text-primary">{track.title}</p>
+                              <p className="text-xs text-text-secondary truncate">{track.artist}</p>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : (
                   <div className="h-64 flex flex-col items-center justify-center text-center max-w-sm mx-auto">
                     <Music className="w-12 h-12 text-text-secondary mb-4 opacity-40" />
                     <p className="text-text-secondary text-sm">Prueba ingresando una búsqueda arriba o seleccionando una categoría.</p>
@@ -3776,10 +3856,9 @@ function App() {
             <div className="space-y-6 animate-fade-in">
               <div className="flex items-center mb-4">
                 <button
-                  onClick={goBack}
-                  disabled={navIndex === 0}
-                  className="p-1 disabled:opacity-30 transition text-text-secondary hover:text-white"
-                  title="Atrás"
+                  onClick={() => { setQuery(""); setTracks([]); navigateTo("buscar"); }}
+                  className="text-text-secondary hover:text-white transition cursor-pointer"
+                  title="Volver a búsqueda"
                 >
                   <ChevronLeft className="w-5 h-5" />
                 </button>
@@ -5516,7 +5595,7 @@ function App() {
                           >
                             {theme === "capi-default" && "Capi Default"}
                             {theme === "ultra-dark" && "Ultra Dark"}
-                            {theme === "light-mode" && "Light Mode"}
+                            {false && theme === "light-mode" && "Light Mode"}
                             {theme === "midnight-blue" && "Midnight Blue"}
                             {theme === "forest-green" && "Forest Green"}
                             {theme === "sunset-orange" && "Sunset Orange"}
@@ -5544,7 +5623,7 @@ function App() {
                                   { id: "cherry-blossom", name: "Cherry Blossom" },
                                   { id: "nordic", name: "Nordic" },
                                   { id: "dracula", name: "Dracula" }
-                                ].map((t) => (
+                                ].filter(t => t.id !== "light-mode").map((t) => (
                                   <button
                                     key={t.id}
                                     onClick={() => {
