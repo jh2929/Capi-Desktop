@@ -516,6 +516,9 @@ function App() {
   // Audio controls state
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
+  const [showRemaining, setShowRemaining] = useState(false);
+  const showRemainingRef = useRef(false);
+  showRemainingRef.current = showRemaining;
   const [volume, setVolume] = useState(() => {
     const migrated = migrateKey("opentune_volume", "capi_volume");
     const saved = migrated || localStorage.getItem("capi_volume");
@@ -1159,6 +1162,7 @@ function App() {
   useEffect(() => {
     if (currentTrack) {
       setLyricsProvider(null);
+      setShowRemaining(false);
       fetchLyrics(currentTrack);
       fetchRelatedTracks(currentTrack.artist);
     }
@@ -2327,6 +2331,10 @@ function App() {
     return `${m}:${s}`;
   };
 
+  const toggleTimeDisplay = () => {
+    setShowRemaining(prev => !prev);
+  };
+
   const lastTimeUpdateRef = useRef(0);
 
   const handleTimeUpdate = () => {
@@ -2368,7 +2376,8 @@ function App() {
       const sMin = document.getElementById("player-slider-min") as HTMLInputElement | null;
       const sExp = document.getElementById("player-slider-exp") as HTMLInputElement | null;
       
-      const formatted = formatTime(cur);
+      const displayVal = showRemainingRef.current ? duration - cur : cur;
+      const formatted = showRemainingRef.current ? `-${formatTime(displayVal)}` : formatTime(displayVal);
       if (tMin) tMin.textContent = formatted;
       if (tExp) tExp.textContent = formatted;
       if (sMin) sMin.value = cur.toString();
@@ -2388,7 +2397,8 @@ function App() {
     // Instant time update during dragging
     const tMin = document.getElementById("player-time-min");
     const tExp = document.getElementById("player-time-exp");
-    const formatted = formatTime(val);
+    const displayVal = showRemainingRef.current ? duration - val : val;
+    const formatted = showRemainingRef.current ? `-${formatTime(displayVal)}` : formatTime(displayVal);
     if (tMin) tMin.textContent = formatted;
     if (tExp) tExp.textContent = formatted;
   };
@@ -6342,7 +6352,7 @@ function App() {
               </button>
             </div>
             <div className="w-full flex items-center gap-3">
-              <span id="player-time-min" className="text-[10px] text-text-secondary w-8 text-right">{formatTime(currentTime)}</span>
+              <span id="player-time-min" className="text-[10px] text-text-secondary w-8 text-right cursor-pointer hover:text-brand-primary transition" onClick={toggleTimeDisplay}>{showRemaining ? `-${formatTime(Math.max(0, duration - currentTime))}` : formatTime(currentTime)}</span>
               <input 
                 id="player-slider-min"
                 type="range" min="0" max={duration || 100} onChange={handleSeek} disabled={!streamUrl}
@@ -6531,7 +6541,7 @@ function App() {
 
               {/* Time Slider */}
               <div className="w-full flex items-center gap-3 px-4">
-                <span id="player-time-exp" className="text-xs text-text-secondary w-10 text-right">{formatTime(currentTime)}</span>
+                <span id="player-time-exp" className="text-xs text-text-secondary w-10 text-right cursor-pointer hover:text-brand-primary transition" onClick={toggleTimeDisplay}>{showRemaining ? `-${formatTime(Math.max(0, duration - currentTime))}` : formatTime(currentTime)}</span>
                 <input id="player-slider-exp" type="range" min="0" max={duration || 100} onChange={handleSeek}
                   className="flex-1 accent-brand-primary h-1 bg-white/10 rounded-full cursor-pointer" />
                 <span className="text-xs text-text-secondary w-10 text-left">{formatTime(duration)}</span>
