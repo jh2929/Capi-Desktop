@@ -915,21 +915,6 @@ function App() {
       });
     }
   }, [tracks, query]);
-
-  // Backfill thumbnails for history items that have none, using favorites/downloadedMetadata
-  useEffect(() => {
-    const all = [...favorites, ...downloadedMetadata];
-    if (all.length === 0) return;
-    setSearchThumbnails(prev => {
-      const updated = { ...prev };
-      for (const q of searchHistory) {
-        if (updated[q]) continue;
-        const match = all.find(t => t.thumbnail === updated[q] || q.toLowerCase().includes(t.artist.toLowerCase()) || q.toLowerCase().includes(t.title.toLowerCase()));
-        if (match && match.thumbnail) updated[q] = match.thumbnail;
-      }
-      return updated;
-    });
-  }, [searchHistory, favorites, downloadedMetadata]);
   useEffect(() => { localStorage.setItem("capi_hidden_artists", JSON.stringify(hiddenArtists)); }, [hiddenArtists]);
   useEffect(() => {
     localStorage.setItem("capi_volume", String(volume));
