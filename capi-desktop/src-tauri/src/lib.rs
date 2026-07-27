@@ -22,7 +22,38 @@ pub struct DiscordState {
     pub client: Mutex<Option<DiscordIpcClient>>,
 }
 
-fn start_local_server(capi_dir: PathBuf) -> Result<u16, String> {
+#[derive(Clone, Serialize, Deserialize)]
+pub struct MediaState {
+    is_playing: bool,
+    title: String,
+    artist: String,
+    album: String,
+    thumbnail: String,
+    duration: f64,
+    position: f64,
+    volume: f64,
+    shuffle: bool,
+    repeat: String,
+}
+
+impl Default for MediaState {
+    fn default() -> Self {
+        Self {
+            is_playing: false,
+            title: String::new(),
+            artist: String::new(),
+            album: String::new(),
+            thumbnail: String::new(),
+            duration: 0.0,
+            position: 0.0,
+            volume: 0.8,
+            shuffle: false,
+            repeat: "none".to_string(),
+        }
+    }
+}
+
+fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std::sync::Arc<std::sync::Mutex<MediaState>>) -> Result<u16, String> {
     let port = (12761..12771).find(|&p| TcpListener::bind(format!("127.0.0.1:{}", p)).is_ok())
         .ok_or("No se pudo encontrar un puerto libre en el rango 12761-12770".to_string())?;
     let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
@@ -42,6 +73,8 @@ fn start_local_server(capi_dir: PathBuf) -> Result<u16, String> {
             if let Ok(mut stream) = stream {
                 let capi_dir = capi_dir.clone();
                 let client = client.clone();
+                let app = app.clone();
+                let media_state = media_state.clone();
                 std::thread::spawn(move || {
                     let mut buffer = [0; 4096];
                     if let Ok(n) = stream.read(&mut buffer) {
@@ -50,6 +83,76 @@ fn start_local_server(capi_dir: PathBuf) -> Result<u16, String> {
                         let parts: Vec<&str> = first_line.split_whitespace().collect();
                         if parts.len() >= 2 && parts[0] == "GET" {
                             let path_and_query = parts[1];
+                            
+                            // ─── Media Control API ─────────────────────
+                            if path_and_query.starts_with("/api/") {
+                                let cors = "Access-Control-Allow-Origin: *\r\nConnection: close\r\n";
+                                match path_and_query {
+                                    p if p == "/api/play-pause" => {
+                                        let _ = app.emit("mpris-command", serde_json::json!({"action": "play-pause"}));
+                                        let body = b"{\"ok\":true}";
+                                        let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n", cors, body.len()).as_bytes());
+                                        let _ = stream.write_all(body);
+                                    }
+                                    p if p == "/api/next" => {
+                                        let _ = app.emit("mpris-command", serde_json::json!({"action": "next"}));
+                                        let body = b"{\"ok\":true}";
+                                        let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n", cors, body.len()).as_bytes());
+                                        let _ = stream.write_all(body);
+                                    }
+                                    p if p == "/api/prev" => {
+                                        let _ = app.emit("mpris-command", serde_json::json!({"action": "prev"}));
+                                        let body = b"{\"ok\":true}";
+                                        let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n", cors, body.len()).as_bytes());
+                                        let _ = stream.write_all(body);
+                                    }
+                                    p if p.starts_with("/api/volume") => {
+                                        let resp = if let Some(level_str) = p.split("level=").nth(1) {
+                                            if let Ok(level) = level_str.split('&').next().unwrap_or("").parse::<f64>() {
+                                                let _ = app.emit("mpris-command", serde_json::json!({"action": "volume", "level": level}));
+                                                "{\"ok\":true}"
+                                            } else {
+                                                "{\"ok\":false,\"error\":\"invalid volume\"}"
+                                            }
+                                        } else {
+                                            "{\"ok\":false,\"error\":\"missing level\"}"
+                                        };
+                                        let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n{}", cors, resp.len(), resp).as_bytes());
+                                    }
+                                    p if p.starts_with("/api/seek") => {
+                                        let resp = if let Some(pos_str) = p.split("position=").nth(1) {
+                                            if let Ok(pos) = pos_str.split('&').next().unwrap_or("").parse::<f64>() {
+                                                let _ = app.emit("mpris-command", serde_json::json!({"action": "seek", "position": pos}));
+                                                "{\"ok\":true}"
+                                            } else {
+                                                "{\"ok\":false,\"error\":\"invalid position\"}"
+                                            }
+                                        } else {
+                                            "{\"ok\":false,\"error\":\"missing position\"}"
+                                        };
+                                        let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n{}", cors, resp.len(), resp).as_bytes());
+                                    }
+                                    p if p == "/api/status" || p == "/api/state" => {
+                                        let guard = match media_state.lock() {
+                                            Ok(g) => g,
+                                            Err(_) => {
+                                                let err = b"{\"ok\":false,\"error\":\"lock failed\"}";
+                                                let _ = stream.write_all(format!("HTTP/1.1 500 Error\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n", cors, err.len()).as_bytes());
+                                                let _ = stream.write_all(err);
+                                                return;
+                                            }
+                                        };
+                                        let json = serde_json::to_string(&*guard).unwrap_or_default();
+                                        let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n{}", cors, json.len(), json).as_bytes());
+                                    }
+                                    _ => {
+                                        let err = b"{\"ok\":false,\"error\":\"unknown\"}";
+                                        let _ = stream.write_all(format!("HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n", cors, err.len()).as_bytes());
+                                        let _ = stream.write_all(err);
+                                    }
+                                }
+                                return;
+                            }
                             
                             // ─── Image proxy: /image?url=... ───────────
                             if path_and_query.starts_with("/image") {
@@ -355,7 +458,7 @@ struct DaemonProcess {
 
 async fn send_daemon_command(
     daemon: Arc<DaemonProcess>,
-    child: Arc<Mutex<std::process::Child>>,
+    _child: Arc<Mutex<std::process::Child>>,
     command: String,
 ) -> Result<String, String> {
     let timeout_dur = std::time::Duration::from_secs(25);
@@ -383,13 +486,6 @@ async fn send_daemon_command(
         }
         Ok(Err(join_err)) => Err(format!("Daemon thread error: {}", join_err)),
         Err(_elapsed) => {
-            // Timeout — kill daemon to unblock the stuck thread
-            if let Ok(mut guard) = child.lock() {
-                let _ = guard.kill();
-                let _ = guard.wait();
-            }
-            // Small pause so the blocking thread detects the broken pipe
-            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
             Err("El daemon dejó de responder".to_string())
         }
     }
@@ -485,6 +581,7 @@ fn restart_daemon(app: &tauri::AppHandle) -> Result<(), String> {
     app.manage(Arc::new(daemon));
     app.manage(Arc::new(Mutex::new(child)));
     println!("[DAEMON] Restarted successfully");
+    let _ = app.emit("daemon-restarted", ());
     Ok(())
 }
 
@@ -1368,6 +1465,19 @@ fn obtener_espacio_almacenamiento(app: tauri::AppHandle) -> Result<StorageInfo, 
     Ok(StorageInfo { app_size, downloads_size, cache_size, free_space })
 }
 
+#[tauri::command]
+fn media_update_state(state: tauri::State<'_, Arc<Mutex<MediaState>>>, new_state: MediaState) -> Result<(), String> {
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    *guard = new_state;
+    Ok(())
+}
+
+#[tauri::command]
+fn media_get_state(state: tauri::State<'_, Arc<Mutex<MediaState>>>) -> Result<MediaState, String> {
+    let guard = state.lock().map_err(|e| e.to_string())?;
+    Ok(guard.clone())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1412,7 +1522,11 @@ pub fn run() {
                     std::fs::create_dir_all(&cache_dir)
                         .map_err(|e| format!("No se pudo crear el directorio de caché: {}", e))?;
                 }
-                let local_port = start_local_server(capi_dir)?;
+                let media_state = Arc::new(Mutex::new(MediaState::default()));
+                let proxy_media_state = media_state.clone();
+                app.manage(media_state);
+
+                let local_port = start_local_server(capi_dir, handle.clone(), proxy_media_state)?;
                 app.manage(LocalServerState { port: local_port });
                 app.manage(DiscordState { client: Mutex::new(None) });
 
@@ -1564,7 +1678,9 @@ pub fn run() {
             set_cache_config,
             list_cached_tracks,
             remove_cached_track,
-            obtener_espacio_almacenamiento
+            obtener_espacio_almacenamiento,
+            media_update_state,
+            media_get_state
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -380,6 +380,7 @@ function App() {
   const [showCreatePlaylistModal, setShowCreatePlaylistModal] = useState(false);
   const [showImportPlaylistModal, setShowImportPlaylistModal] = useState(false);
   const [importPlaylistUrl, setImportPlaylistUrl] = useState("");
+  const [errorModal, setErrorModal] = useState<{ message: string } | null>(null);
   const streamCacheRef = useRef<Record<string, string>>({});
   // const playCountCacheRef = useRef<Record<string, number>>({});
   const nextRandomIndexRef = useRef<number | null>(null);
@@ -526,6 +527,9 @@ function App() {
   });
   const [buffering, setBuffering] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const togglePlayRef = useRef<() => void>(() => {});
+  const playNextRef = useRef<() => void>(() => {});
+  const playPrevRef = useRef<() => void>(() => {});
   const [localPort, setLocalPort] = useState<number | null>(null);
   const [scrolled, setScrolled] = useState(false);
   const [artistScrolled, setArtistScrolled] = useState(false);
@@ -863,6 +867,62 @@ function App() {
       unlisten.then(f => f());
     };
   }, []);
+
+  // ─── MPRIS Control listener (from proxy API) ───────────────────────
+  useEffect(() => {
+    const unlisten = listen<any>("mpris-command", (event) => {
+      const payload = event.payload;
+      switch (payload.action) {
+        case "play-pause":
+          togglePlayRef.current();
+          break;
+        case "next":
+          playNextRef.current();
+          break;
+        case "prev":
+          playPrevRef.current();
+          break;
+        case "seek":
+          if (audioRef.current) {
+            audioRef.current.currentTime = payload.position;
+            setCurrentTime(payload.position);
+          }
+          break;
+        case "volume":
+          const clamped = Math.max(0, Math.min(1, payload.level));
+          setVolume(clamped);
+          if (audioRef.current) audioRef.current.volume = clamped;
+          break;
+      }
+    });
+    return () => { unlisten.then(f => f()); };
+  }, []);
+
+  // ─── Emit media state to Rust backend every 3s ────────────────────
+  const emitMediaState = useCallback(() => {
+    if (!currentTrack) return;
+    invoke("media_update_state", {
+      newState: {
+        is_playing: isPlaying,
+        title: currentTrack.title,
+        artist: currentTrack.artist,
+        album: currentTrack.album || "",
+        thumbnail: currentTrack.thumbnail,
+        duration,
+        position: currentTime,
+        volume,
+        shuffle: isShuffle,
+        repeat: repeatMode,
+      }
+    }).catch(() => {});
+  }, [currentTrack, isPlaying, currentTime, duration, volume, isShuffle, repeatMode]);
+
+  useEffect(() => {
+    emitMediaState();
+    if (!isPlaying || !currentTrack) return;
+    const interval = setInterval(emitMediaState, 3000);
+    return () => clearInterval(interval);
+  }, [emitMediaState, isPlaying, currentTrack]);
 
   // Track scroll position for immersive header/sidebar borders
   useEffect(() => {
@@ -1469,7 +1529,7 @@ function App() {
       });
     } catch (err) {
       console.error("Failed to parse album tracks:", err);
-      alert("Error al cargar las canciones del álbum.");
+      setErrorModal({ message: "Error al cargar las canciones del álbum." });
     }
   };
 
@@ -1998,7 +2058,7 @@ function App() {
           }
         } catch (err: any) {
           console.error("[PLAY] Failed to resolve playlist:", err);
-          alert("Error al cargar la playlist: " + (err.message || err));
+          setErrorModal({ message: "Error al cargar la playlist: " + (err.message || err) });
           setLoading(false);
           setBuffering(false);
           return;
@@ -2041,11 +2101,26 @@ function App() {
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'using cached stream URL');
       } else {
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'calling obtener_stream...');
-        const resultJson = await invoke<string>("obtener_stream", { id: track.id });
+        let resultJson: string;
+        let retries = 0;
+        while (true) {
+          try {
+            resultJson = await invoke<string>("obtener_stream", { id: track.id });
+          } catch (e) {
+            if (retries < 2) {
+              retries++;
+              console.warn(`[PLAY] Stream retry ${retries} for ${track.title}`);
+              await new Promise(r => setTimeout(r, 1500));
+              continue;
+            }
+            throw e;
+          }
+          break;
+        }
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'obtener_stream returned');
-        stream = resultJson;
+        stream = resultJson!;
         try {
-          const parsed = JSON.parse(resultJson);
+          const parsed = JSON.parse(resultJson!);
           if (parsed.error) {
             throw new Error(parsed.error);
           }
@@ -2100,7 +2175,7 @@ function App() {
           console.timeEnd(`[PLAY-TIMING] ${track.title}`);
           console.error("Playback error:", err, "for stream:", stream);
           if (stream.startsWith("http://127.0.0.1")) {
-            alert("No se pudo reproducir el archivo local: " + err.message);
+            setErrorModal({ message: "No se pudo reproducir el archivo local: " + err.message });
           }
           setBuffering(false);
           setLoading(false);
@@ -2108,7 +2183,7 @@ function App() {
       }
     } catch (error) {
       console.error("Stream acquisition failed:", error);
-      alert("Error al cargar la canción.");
+      setErrorModal({ message: "Error al cargar la canción." });
       setLoading(false);
       setBuffering(false);
     }
@@ -2206,7 +2281,7 @@ function App() {
     } catch (error) {
       if (activeDownloadsRef.current[track.id]) {
         console.error("Download failed:", error);
-        alert("Error al descargar.");
+        setErrorModal({ message: "Error al descargar." });
       }
     } finally {
       setActiveDownloads(prev => {
@@ -2235,7 +2310,7 @@ function App() {
       });
       setDownloadedMetadata(prev => prev.filter(t => t.id !== trackId));
     } catch (e) {
-      alert("No se pudo borrar el archivo: " + e);
+      setErrorModal({ message: "No se pudo borrar el archivo: " + e });
     }
   };
 
@@ -2448,6 +2523,10 @@ function App() {
       playTrack(activeQueue[activeQueue.length - 1]);
     }
   };
+
+  togglePlayRef.current = togglePlay;
+  playNextRef.current = playNext;
+  playPrevRef.current = playPrev;
 
   const isFavorite = (track: Track) => favorites.some(t => t.id === track.id);
   const toggleFavorite = (track: Track) => {
@@ -7495,6 +7574,29 @@ function App() {
               <p className="font-bold text-white text-base">{T("loading_tracks") || "Cargando canciones..."}</p>
               <p className="text-xs text-text-secondary">Esto puede demorar unos segundos</p>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* ERROR MODAL */}
+      {errorModal && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[90] animate-fade-in" onClick={() => setErrorModal(null)}>
+          <div className="glass p-8 rounded-3xl max-w-sm w-full border border-white/10 shadow-2xl mx-4 text-center space-y-5" onClick={(e) => e.stopPropagation()}>
+            <div className="w-14 h-14 mx-auto rounded-full bg-red-500/20 flex items-center justify-center">
+              <svg className="w-7 h-7 text-red-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v3.75m9-.75a9 9 0 11-18 0 9 9 0 0118 0zm-9 3.75h.008v.008H12v-.008z" />
+              </svg>
+            </div>
+            <div className="space-y-1">
+              <p className="font-bold text-white text-lg">Error</p>
+              <p className="text-sm text-text-secondary leading-relaxed">{errorModal.message}</p>
+            </div>
+            <button
+              onClick={() => setErrorModal(null)}
+              className="px-6 py-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-white text-sm font-medium transition-all duration-200 active:scale-95"
+            >
+              Cerrar
+            </button>
           </div>
         </div>
       )}

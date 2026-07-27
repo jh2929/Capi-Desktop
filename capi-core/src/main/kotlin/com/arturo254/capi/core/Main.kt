@@ -426,319 +426,356 @@ fun main(args: Array<String>) {
                 println(Json.encodeToString(mapOf("status" to "ready")))
                 System.out.flush()
 
-                val reader = java.io.BufferedReader(java.io.InputStreamReader(System.`in`))
-                while (true) {
-                    val line = reader.readLine() ?: break
-                    if (line.isBlank()) continue
-                    val response = try {
-                        val cmdObj = Json.parseToJsonElement(line) as? JsonObject
-                        val act = cmdObj?.get("action")?.jsonPrimitive?.contentOrNull
-                        when (act) {
-                            "search" -> {
-                                val query = cmdObj["query"]?.jsonPrimitive?.contentOrNull ?: throw Exception("Missing query")
-                                val result = YouTube.search(query, SearchFilter.FILTER_SONG).getOrThrow()
-                                val songs = result.items.filterIsInstance<SongItem>().map {
-                                    SongDTO(
-                                        id = it.id,
-                                        title = it.title,
-                                        artist = it.artists.joinToString(", ") { a -> a.name },
-                                        album = it.album?.name,
-                                        duration = it.duration,
-                                        thumbnail = it.thumbnail,
-                                        explicit = it.explicit,
-                                        artistId = it.artists.firstOrNull()?.id
-                                    )
-                                }
-                                Json.encodeToString(songs)
+                // Auto refresh tokens every 30 minutes to prevent expiration
+                launch {
+                    while (true) {
+                        delay(30 * 60 * 1000)
+                        try {
+                            val newVisitorData = withTimeoutOrNull(10000) {
+                                YouTube.visitorData().getOrNull()
                             }
-                            "get-stream" -> {
-                                val videoId = cmdObj["id"]?.jsonPrimitive?.contentOrNull ?: throw Exception("Missing id")
-                                val reqPoToken = cmdObj["poToken"]?.jsonPrimitive?.contentOrNull
-                                val reqVisitorData = cmdObj["visitorData"]?.jsonPrimitive?.contentOrNull
-                                if (!reqPoToken.isNullOrBlank() && !reqVisitorData.isNullOrBlank()) {
-                                    YouTube.visitorData = reqVisitorData
-                                    YouTube.poToken = reqPoToken
-                                    YouTube.poTokenGvs = reqPoToken
-                                    YouTube.poTokenPlayer = reqPoToken
-                                }
-                                      val clients = listOf(
-                                          YouTubeClient.ANDROID_MUSIC,
-                                          YouTubeClient.ANDROID_VR_NO_AUTH
-                                      )
-                                    val sig = if (clients.any { it.useSignatureTimestamp }) {
-                                        cachedSignatureTimestamp ?: NewPipeUtils.getSignatureTimestamp(videoId).getOrNull()?.also {
-                                            cachedSignatureTimestamp = it
-                                        }
-                                    } else null
-                                    val streamUrl = kotlinx.coroutines.supervisorScope {
-                                     val deferreds = clients.map { client ->
-                                        async(Dispatchers.IO) {
-                                            try {
-                                                val playerResp = YouTube.player(
-                                                    videoId = videoId,
-                                                    client = client,
-                                                    signatureTimestamp = sig
-                                                ).getOrThrow()
-
-                                                val audioFormats = playerResp.streamingData?.adaptiveFormats?.filter { it.isAudio && it.mimeType?.contains("codecs=\"opus\"") != true } ?: emptyList()
-                                                if (audioFormats.isNotEmpty()) {
-                                                    val format = audioFormats.maxByOrNull { it.bitrate }!!
-                                                    val urlResult = NewPipeUtils.getStreamUrl(format, videoId, client)
-                                                    val url = urlResult.getOrNull()
-                                                    if (url != null) {
-                                                        return@async url
-                                                    } else {
-                                                        val err = urlResult.exceptionOrNull()
-                                                        System.err.println("[DEBUG] Client ${client.clientName}: NewPipeUtils.getStreamUrl failed: ${err?.message} | Cause: ${err?.cause?.message}")
-                                                    }
-                                                } else {
-                                                    System.err.println("[DEBUG] Client ${client.clientName} playability: ${playerResp.playabilityStatus.status}, reason: ${playerResp.playabilityStatus.reason}")
-                                                }
-                                            } catch (e: Exception) {
-                                                val msg = e.message?.take(200) ?: "Unknown error"
-                                                System.err.println("[DEBUG] Client ${client.clientName} failed: $msg")
-                                            }
-                                            null
-                                        }
-                                    }
-
-                                    val channel = kotlinx.coroutines.channels.Channel<String>(1)
-                                    var activeJobs = deferreds.size
-                                    deferreds.forEach { deferred ->
-                                        launch {
-                                            try {
-                                                val res = deferred.await()
-                                                if (res != null) {
-                                                    channel.trySend(res)
-                                                }
-                                            } finally {
-                                                activeJobs--
-                                                if (activeJobs == 0) {
-                                                    channel.close()
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    val firstResult = channel.receiveCatching().getOrNull()
-                                    deferreds.forEach { it.cancel() }
-                                    firstResult
-                                }
-                                if (streamUrl != null) {
-                                    Json.encodeToString(StreamDTO(streamUrl))
-                                } else {
-                                    throw Exception("No stream found for videoId $videoId")
-                                }
+                            YouTube.visitorData = newVisitorData
+                            if (newVisitorData != null) {
+                                YouTube.poToken = PoTokenGenerator.generateColdStartToken(newVisitorData)
+                                YouTube.poTokenGvs = PoTokenGenerator.generateSessionToken(newVisitorData)
+                                YouTube.poTokenPlayer = PoTokenGenerator.generateColdStartToken(newVisitorData, "player")
+                                System.err.println("[DAEMON] Tokens refreshed automatically")
                             }
-                            "lyrics" -> {
-                                val id = cmdObj["id"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                                val artist = cmdObj["artist"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                                val title = cmdObj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
-                                val album = cmdObj["album"]?.jsonPrimitive?.contentOrNull
-                                val duration = cmdObj["duration"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: -1
-                                val provider = cmdObj["provider"]?.jsonPrimitive?.contentOrNull
-
-                                val result = supervisorScope {
-                                    val allProviders = listOf(
-                                        "YouTube Music" to async(Dispatchers.IO) {
-                                            runCatching {
-                                                val nextResult = YouTube.next(WatchEndpoint(videoId = id)).getOrThrow()
-                                                val lyricsEndpoint = nextResult.lyricsEndpoint ?: throw IllegalStateException("No lyrics endpoint")
-                                                YouTube.lyrics(endpoint = lyricsEndpoint).getOrThrow() ?: throw IllegalStateException("Lyrics unavailable")
-                                            }.getOrNull()
-                                        },
-                                        "YouTube Subtitle" to async(Dispatchers.IO) {
-                                            runCatching { YouTube.transcript(id).getOrThrow() }.getOrNull()
-                                        },
-                                        "LrcLib" to async(Dispatchers.IO) {
-                                            LrcLib.getLyrics(title, artist, duration).getOrNull()
-                                        },
-                                        "KuGou" to async(Dispatchers.IO) {
-                                            kugouGetLyrics(title, artist, duration).getOrNull()
-                                        },
-                                        "SimpMusic" to async(Dispatchers.IO) {
-                                            simpmusicGetLyrics(videoId = id, duration = duration).getOrNull()
-                                        },
-                                        "BetterLyrics" to async(Dispatchers.IO) {
-                                            betterlyricsGetLyrics(title = title, artist = artist, album = album, durationSeconds = duration).getOrNull()?.let { normalizeLyrics(it) }
-                                        }
-                                    )
-                                    val active = if (provider != null) allProviders.filter { it.first == provider } else allProviders
-
-                                    val channel = kotlinx.coroutines.channels.Channel<Pair<String, String>>(1)
-                                    var activeJobs = active.size
-                                    active.forEach { (name, deferred) ->
-                                        launch {
-                                            try {
-                                                val res = deferred.await()
-                                                if (res != null) {
-                                                    channel.trySend(name to res)
-                                                }
-                                            } finally {
-                                                activeJobs--
-                                                if (activeJobs == 0) {
-                                                    channel.close()
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    val firstResult = withTimeoutOrNull(8000) {
-                                        channel.receiveCatching().getOrNull()
-                                    }
-                                    active.forEach { (_, deferred) -> deferred.cancel() }
-                                    firstResult
-                                }
-
-                                if (result != null) {
-                                    Json.encodeToString(LyricsResultDTO(result.second, result.first))
-                                } else {
-                                    Json.encodeToString(LyricsResultDTO(null))
-                                }
-                            }
-                            "new-releases" -> {
-                                val albums = YouTube.newReleaseAlbums().getOrThrow()
-                                val items = albums.map { mapYTItem(it) }
-                                Json.encodeToString(items)
-                            }
-                            "home" -> {
-                                val continuation = cmdObj["continuation"]?.jsonPrimitive?.contentOrNull
-                                val homePage = YouTube.home(continuation = continuation).getOrThrow()
-                                val sections = homePage.sections.map { section ->
-                                    HomeSectionDTO(
-                                        title = section.title,
-                                        label = section.label,
-                                        thumbnail = section.thumbnail,
-                                        params = section.endpoint?.params,
-                                        items = section.items.map { mapYTItem(it) }
-                                    )
-                                }
-                                val response = HomeResponseDTO(sections, homePage.continuation)
-                                Json.encodeToString(response)
-                            }
-                            "artist" -> {
-                                val artistId = cmdObj["id"]?.jsonPrimitive?.contentOrNull ?: throw Exception("Missing id")
-                                val artistPage = YouTube.artist(artistId).getOrThrow()
-                                val dto = ArtistPageDTO(
-                                    id = artistPage.artist.id,
-                                    name = artistPage.artist.title,
-                                    thumbnail = artistPage.artist.thumbnail,
-                                    description = artistPage.description,
-                                    sections = artistPage.sections.map { section ->
-                                        ArtistSectionDTO(
-                                            title = section.title,
-                                            items = section.items.map { mapYTItem(it) },
-                                            browseId = section.moreEndpoint?.browseId,
-                                            params = section.moreEndpoint?.params
-                                        )
-                                    }
-                                )
-                                Json.encodeToString(dto)
-                            }
-                            "explore" -> {
-                                val explorePage = YouTube.explore().getOrThrow()
-                                val dto = ExploreResponseDTO(
-                                    newReleaseAlbums = explorePage.newReleaseAlbums.map { mapYTItem(it) },
-                                    moodAndGenres = explorePage.moodAndGenres.map { item ->
-                                        MoodGenreDTO(
-                                            title = item.title,
-                                            stripeColor = item.stripeColor,
-                                            browseId = item.endpoint.browseId,
-                                            params = item.endpoint.params
-                                        )
-                                    }
-                                )
-                                Json.encodeToString(dto)
-                            }
-                            "refresh-tokens" -> {
-                                val newVisitorData = withTimeoutOrNull(5000) {
-                                    YouTube.visitorData().getOrNull()
-                                }
-                                YouTube.visitorData = newVisitorData
-                                if (newVisitorData != null) {
-                                    YouTube.poToken = PoTokenGenerator.generateColdStartToken(newVisitorData)
-                                    YouTube.poTokenGvs = PoTokenGenerator.generateSessionToken(newVisitorData)
-                                    YouTube.poTokenPlayer = PoTokenGenerator.generateColdStartToken(newVisitorData, "player")
-                                    Json.encodeToString(mapOf("success" to true))
-                                } else {
-                                    throw Exception("Failed to refresh visitorData")
-                                }
-                            }
-                            "ping" -> {
-                                Json.encodeToString(mapOf("status" to "pong"))
-                            }
-                            "set-tokens" -> {
-                                val newPoToken = cmdObj["poToken"]?.jsonPrimitive?.contentOrNull
-                                val newVisitorData = cmdObj["visitorData"]?.jsonPrimitive?.contentOrNull
-                                if (newPoToken != null && newVisitorData != null) {
-                                    YouTube.visitorData = newVisitorData
-                                    YouTube.poToken = newPoToken
-                                    YouTube.poTokenGvs = newPoToken
-                                    YouTube.poTokenPlayer = newPoToken
-                                    System.err.println("[DAEMON] Dynamic PO Token set successfully")
-                                    Json.encodeToString(mapOf("success" to true))
-                                } else {
-                                    throw Exception("Missing poToken or visitorData")
-                                }
-                            }
-                            "get-playlist" -> {
-                                var playlistId = cmdObj["id"]?.jsonPrimitive?.contentOrNull ?: throw Exception("Missing id")
-                                if (playlistId.startsWith("VL")) {
-                                    playlistId = playlistId.substring(2)
-                                }
-                                val songs = if (playlistId.startsWith("OLAK")) {
-                                    val resolvedSongs = YouTube.albumSongs(playlistId).getOrThrow()
-                                    resolvedSongs.map {
-                                        SongDTO(
-                                            id = it.id,
-                                            title = it.title,
-                                            artist = it.artists.joinToString(", ") { a -> a.name },
-                                            album = it.album?.name,
-                                            duration = it.duration,
-                                            thumbnail = it.thumbnail,
-                                            explicit = it.explicit,
-                                            artistId = it.artists.firstOrNull()?.id
-                                        )
-                                    }
-                                } else if (playlistId.startsWith("MPREb")) {
-                                    val albumPage = YouTube.album(playlistId).getOrThrow()
-                                    albumPage.songs.map {
-                                        SongDTO(
-                                            id = it.id,
-                                            title = it.title,
-                                            artist = it.artists.joinToString(", ") { a -> a.name },
-                                            album = it.album?.name,
-                                            duration = it.duration,
-                                            thumbnail = it.thumbnail,
-                                            explicit = it.explicit,
-                                            artistId = it.artists.firstOrNull()?.id
-                                        )
-                                    }
-                                } else {
-                                    val playlistPage = YouTube.playlist(playlistId).getOrThrow()
-                                    playlistPage.songs.map {
-                                        SongDTO(
-                                            id = it.id,
-                                            title = it.title,
-                                            artist = it.artists.joinToString(", ") { a -> a.name },
-                                            album = it.album?.name,
-                                            duration = it.duration,
-                                            thumbnail = it.thumbnail,
-                                            explicit = it.explicit,
-                                            artistId = it.artists.firstOrNull()?.id
-                                        )
-                                    }
-                                }
-                                Json.encodeToString(songs)
-                            }
-                            else -> throw Exception("Unknown action: $act")
+                        } catch (e: Exception) {
+                            System.err.println("[DAEMON] Token refresh failed: ${e.message}")
                         }
-                    } catch (e: Exception) {
-                        val msg = e.message?.take(200) ?: "Unknown error"
-                        Json.encodeToString(ErrorDTO(msg))
                     }
-                    println(response)
-                    System.out.flush()
+                }
+
+                val reader = java.io.BufferedReader(java.io.InputStreamReader(System.`in`))
+                var stdinErrorCount = 0
+                while (true) {
+                    try {
+                        val line = reader.readLine() ?: run {
+                            System.err.println("[DAEMON] stdin closed, exiting")
+                            return@runBlocking
+                        }
+                        if (line.isBlank()) continue
+                        val response = try {
+                            val cmdObj = Json.parseToJsonElement(line) as? JsonObject
+                            val act = cmdObj?.get("action")?.jsonPrimitive?.contentOrNull
+                            when (act) {
+                                "search" -> {
+                                    val query = cmdObj["query"]?.jsonPrimitive?.contentOrNull ?: throw Exception("Missing query")
+                                    val result = YouTube.search(query, SearchFilter.FILTER_SONG).getOrThrow()
+                                    val songs = result.items.filterIsInstance<SongItem>().map {
+                                        SongDTO(
+                                            id = it.id,
+                                            title = it.title,
+                                            artist = it.artists.joinToString(", ") { a -> a.name },
+                                            album = it.album?.name,
+                                            duration = it.duration,
+                                            thumbnail = it.thumbnail,
+                                            explicit = it.explicit,
+                                            artistId = it.artists.firstOrNull()?.id
+                                        )
+                                    }
+                                    Json.encodeToString(songs)
+                                }
+                                "get-stream" -> {
+                                    val videoId = cmdObj["id"]?.jsonPrimitive?.contentOrNull ?: throw Exception("Missing id")
+                                    val reqPoToken = cmdObj["poToken"]?.jsonPrimitive?.contentOrNull
+                                    val reqVisitorData = cmdObj["visitorData"]?.jsonPrimitive?.contentOrNull
+                                    if (!reqPoToken.isNullOrBlank() && !reqVisitorData.isNullOrBlank()) {
+                                        YouTube.visitorData = reqVisitorData
+                                        YouTube.poToken = reqPoToken
+                                        YouTube.poTokenGvs = reqPoToken
+                                        YouTube.poTokenPlayer = reqPoToken
+                                    }
+                                          val clients = listOf(
+                                              YouTubeClient.ANDROID_MUSIC,
+                                              YouTubeClient.ANDROID_VR_NO_AUTH
+                                          )
+                                        val sig = if (clients.any { it.useSignatureTimestamp }) {
+                                            cachedSignatureTimestamp ?: NewPipeUtils.getSignatureTimestamp(videoId).getOrNull()?.also {
+                                                cachedSignatureTimestamp = it
+                                            }
+                                        } else null
+                                        val streamUrl = kotlinx.coroutines.supervisorScope {
+                                         val deferreds = clients.map { client ->
+                                            async(Dispatchers.IO) {
+                                                try {
+                                                    val playerResp = YouTube.player(
+                                                        videoId = videoId,
+                                                        client = client,
+                                                        signatureTimestamp = sig
+                                                    ).getOrThrow()
+
+                                                    val audioFormats = playerResp.streamingData?.adaptiveFormats?.filter { it.isAudio && it.mimeType?.contains("codecs=\"opus\"") != true } ?: emptyList()
+                                                    if (audioFormats.isNotEmpty()) {
+                                                        val format = audioFormats.maxByOrNull { it.bitrate }!!
+                                                        val urlResult = NewPipeUtils.getStreamUrl(format, videoId, client)
+                                                        val url = urlResult.getOrNull()
+                                                        if (url != null) {
+                                                            return@async url
+                                                        } else {
+                                                            val err = urlResult.exceptionOrNull()
+                                                            System.err.println("[DEBUG] Client ${client.clientName}: NewPipeUtils.getStreamUrl failed: ${err?.message} | Cause: ${err?.cause?.message}")
+                                                        }
+                                                    } else {
+                                                        System.err.println("[DEBUG] Client ${client.clientName} playability: ${playerResp.playabilityStatus.status}, reason: ${playerResp.playabilityStatus.reason}")
+                                                    }
+                                                } catch (e: Exception) {
+                                                    val msg = e.message?.take(200) ?: "Unknown error"
+                                                    System.err.println("[DEBUG] Client ${client.clientName} failed: $msg")
+                                                }
+                                                null
+                                            }
+                                        }
+
+                                        val channel = kotlinx.coroutines.channels.Channel<String>(1)
+                                        var activeJobs = deferreds.size
+                                        deferreds.forEach { deferred ->
+                                            launch {
+                                                try {
+                                                    val res = deferred.await()
+                                                    if (res != null) {
+                                                        channel.trySend(res)
+                                                    }
+                                                } finally {
+                                                    activeJobs--
+                                                    if (activeJobs == 0) {
+                                                        channel.close()
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        val firstResult = channel.receiveCatching().getOrNull()
+                                        deferreds.forEach { it.cancel() }
+                                        firstResult
+                                    }
+                                    if (streamUrl != null) {
+                                        Json.encodeToString(StreamDTO(streamUrl))
+                                    } else {
+                                        throw Exception("No stream found for videoId $videoId")
+                                    }
+                                }
+                                "lyrics" -> {
+                                    val id = cmdObj["id"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                                    val artist = cmdObj["artist"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                                    val title = cmdObj["title"]?.jsonPrimitive?.contentOrNull.orEmpty()
+                                    val album = cmdObj["album"]?.jsonPrimitive?.contentOrNull
+                                    val duration = cmdObj["duration"]?.jsonPrimitive?.contentOrNull?.toIntOrNull() ?: -1
+                                    val provider = cmdObj["provider"]?.jsonPrimitive?.contentOrNull
+
+                                    val result = supervisorScope {
+                                        val allProviders = listOf(
+                                            "YouTube Music" to async(Dispatchers.IO) {
+                                                runCatching {
+                                                    val nextResult = YouTube.next(WatchEndpoint(videoId = id)).getOrThrow()
+                                                    val lyricsEndpoint = nextResult.lyricsEndpoint ?: throw IllegalStateException("No lyrics endpoint")
+                                                    YouTube.lyrics(endpoint = lyricsEndpoint).getOrThrow() ?: throw IllegalStateException("Lyrics unavailable")
+                                                }.getOrNull()
+                                            },
+                                            "YouTube Subtitle" to async(Dispatchers.IO) {
+                                                runCatching { YouTube.transcript(id).getOrThrow() }.getOrNull()
+                                            },
+                                            "LrcLib" to async(Dispatchers.IO) {
+                                                LrcLib.getLyrics(title, artist, duration).getOrNull()
+                                            },
+                                            "KuGou" to async(Dispatchers.IO) {
+                                                kugouGetLyrics(title, artist, duration).getOrNull()
+                                            },
+                                            "SimpMusic" to async(Dispatchers.IO) {
+                                                simpmusicGetLyrics(videoId = id, duration = duration).getOrNull()
+                                            },
+                                            "BetterLyrics" to async(Dispatchers.IO) {
+                                                betterlyricsGetLyrics(title = title, artist = artist, album = album, durationSeconds = duration).getOrNull()?.let { normalizeLyrics(it) }
+                                            }
+                                        )
+                                        val active = if (provider != null) allProviders.filter { it.first == provider } else allProviders
+
+                                        val channel = kotlinx.coroutines.channels.Channel<Pair<String, String>>(1)
+                                        var activeJobs = active.size
+                                        active.forEach { (name, deferred) ->
+                                            launch {
+                                                try {
+                                                    val res = deferred.await()
+                                                    if (res != null) {
+                                                        channel.trySend(name to res)
+                                                    }
+                                                } finally {
+                                                    activeJobs--
+                                                    if (activeJobs == 0) {
+                                                        channel.close()
+                                                    }
+                                                }
+                                            }
+                                        }
+
+                                        val firstResult = withTimeoutOrNull(8000) {
+                                            channel.receiveCatching().getOrNull()
+                                        }
+                                        active.forEach { (_, deferred) -> deferred.cancel() }
+                                        firstResult
+                                    }
+
+                                    if (result != null) {
+                                        Json.encodeToString(LyricsResultDTO(result.second, result.first))
+                                    } else {
+                                        Json.encodeToString(LyricsResultDTO(null))
+                                    }
+                                }
+                                "new-releases" -> {
+                                    val albums = YouTube.newReleaseAlbums().getOrThrow()
+                                    val items = albums.map { mapYTItem(it) }
+                                    Json.encodeToString(items)
+                                }
+                                "home" -> {
+                                    val continuation = cmdObj["continuation"]?.jsonPrimitive?.contentOrNull
+                                    val homePage = YouTube.home(continuation = continuation).getOrThrow()
+                                    val sections = homePage.sections.map { section ->
+                                        HomeSectionDTO(
+                                            title = section.title,
+                                            label = section.label,
+                                            thumbnail = section.thumbnail,
+                                            params = section.endpoint?.params,
+                                            items = section.items.map { mapYTItem(it) }
+                                        )
+                                    }
+                                    val response = HomeResponseDTO(sections, homePage.continuation)
+                                    Json.encodeToString(response)
+                                }
+                                "artist" -> {
+                                    val artistId = cmdObj["id"]?.jsonPrimitive?.contentOrNull ?: throw Exception("Missing id")
+                                    val artistPage = YouTube.artist(artistId).getOrThrow()
+                                    val dto = ArtistPageDTO(
+                                        id = artistPage.artist.id,
+                                        name = artistPage.artist.title,
+                                        thumbnail = artistPage.artist.thumbnail,
+                                        description = artistPage.description,
+                                        sections = artistPage.sections.map { section ->
+                                            ArtistSectionDTO(
+                                                title = section.title,
+                                                items = section.items.map { mapYTItem(it) },
+                                                browseId = section.moreEndpoint?.browseId,
+                                                params = section.moreEndpoint?.params
+                                            )
+                                        }
+                                    )
+                                    Json.encodeToString(dto)
+                                }
+                                "explore" -> {
+                                    val explorePage = YouTube.explore().getOrThrow()
+                                    val dto = ExploreResponseDTO(
+                                        newReleaseAlbums = explorePage.newReleaseAlbums.map { mapYTItem(it) },
+                                        moodAndGenres = explorePage.moodAndGenres.map { item ->
+                                            MoodGenreDTO(
+                                                title = item.title,
+                                                stripeColor = item.stripeColor,
+                                                browseId = item.endpoint.browseId,
+                                                params = item.endpoint.params
+                                            )
+                                        }
+                                    )
+                                    Json.encodeToString(dto)
+                                }
+                                "refresh-tokens" -> {
+                                    val newVisitorData = withTimeoutOrNull(5000) {
+                                        YouTube.visitorData().getOrNull()
+                                    }
+                                    YouTube.visitorData = newVisitorData
+                                    if (newVisitorData != null) {
+                                        YouTube.poToken = PoTokenGenerator.generateColdStartToken(newVisitorData)
+                                        YouTube.poTokenGvs = PoTokenGenerator.generateSessionToken(newVisitorData)
+                                        YouTube.poTokenPlayer = PoTokenGenerator.generateColdStartToken(newVisitorData, "player")
+                                        Json.encodeToString(mapOf("success" to true))
+                                    } else {
+                                        throw Exception("Failed to refresh visitorData")
+                                    }
+                                }
+                                "ping" -> {
+                                    Json.encodeToString(mapOf("status" to "pong"))
+                                }
+                                "set-tokens" -> {
+                                    val newPoToken = cmdObj["poToken"]?.jsonPrimitive?.contentOrNull
+                                    val newVisitorData = cmdObj["visitorData"]?.jsonPrimitive?.contentOrNull
+                                    if (newPoToken != null && newVisitorData != null) {
+                                        YouTube.visitorData = newVisitorData
+                                        YouTube.poToken = newPoToken
+                                        YouTube.poTokenGvs = newPoToken
+                                        YouTube.poTokenPlayer = newPoToken
+                                        System.err.println("[DAEMON] Dynamic PO Token set successfully")
+                                        Json.encodeToString(mapOf("success" to true))
+                                    } else {
+                                        throw Exception("Missing poToken or visitorData")
+                                    }
+                                }
+                                "get-playlist" -> {
+                                    var playlistId = cmdObj["id"]?.jsonPrimitive?.contentOrNull ?: throw Exception("Missing id")
+                                    if (playlistId.startsWith("VL")) {
+                                        playlistId = playlistId.substring(2)
+                                    }
+                                    val songs = if (playlistId.startsWith("OLAK")) {
+                                        val resolvedSongs = YouTube.albumSongs(playlistId).getOrThrow()
+                                        resolvedSongs.map {
+                                            SongDTO(
+                                                id = it.id,
+                                                title = it.title,
+                                                artist = it.artists.joinToString(", ") { a -> a.name },
+                                                album = it.album?.name,
+                                                duration = it.duration,
+                                                thumbnail = it.thumbnail,
+                                                explicit = it.explicit,
+                                                artistId = it.artists.firstOrNull()?.id
+                                            )
+                                        }
+                                    } else if (playlistId.startsWith("MPREb")) {
+                                        val albumPage = YouTube.album(playlistId).getOrThrow()
+                                        albumPage.songs.map {
+                                            SongDTO(
+                                                id = it.id,
+                                                title = it.title,
+                                                artist = it.artists.joinToString(", ") { a -> a.name },
+                                                album = it.album?.name,
+                                                duration = it.duration,
+                                                thumbnail = it.thumbnail,
+                                                explicit = it.explicit,
+                                                artistId = it.artists.firstOrNull()?.id
+                                            )
+                                        }
+                                    } else {
+                                        val playlistPage = YouTube.playlist(playlistId).getOrThrow()
+                                        playlistPage.songs.map {
+                                            SongDTO(
+                                                id = it.id,
+                                                title = it.title,
+                                                artist = it.artists.joinToString(", ") { a -> a.name },
+                                                album = it.album?.name,
+                                                duration = it.duration,
+                                                thumbnail = it.thumbnail,
+                                                explicit = it.explicit,
+                                                artistId = it.artists.firstOrNull()?.id
+                                            )
+                                        }
+                                    }
+                                    Json.encodeToString(songs)
+                                }
+                                else -> throw Exception("Unknown action: $act")
+                            }
+                        } catch (e: Exception) {
+                            val msg = e.message?.take(200) ?: "Unknown error"
+                            Json.encodeToString(ErrorDTO(msg))
+                        }
+                        println(response)
+                        System.out.flush()
+                    } catch (e: Exception) {
+                        System.err.println("[DAEMON] Unexpected error in main loop: ${e.message}")
+                        stdinErrorCount++
+                        if (stdinErrorCount > 5) {
+                            System.err.println("[DAEMON] Too many stdin errors, exiting")
+                            return@runBlocking
+                        }
+                        try {
+                            delay(2000)
+                        } catch (_: Exception) {}
+                    }
                 }
             } else {
                 YouTube.visitorData = YouTube.visitorData().getOrNull()
