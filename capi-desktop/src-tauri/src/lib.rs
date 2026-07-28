@@ -463,10 +463,11 @@ struct DaemonProcess {
 
 async fn send_daemon_command(
     daemon: Arc<DaemonProcess>,
-    _child: Arc<Mutex<std::process::Child>>,
+    child: Arc<Mutex<std::process::Child>>,
     command: String,
 ) -> Result<String, String> {
     let timeout_dur = std::time::Duration::from_secs(25);
+    let child_clone = child.clone();
 
     let result = tokio::time::timeout(
         timeout_dur,
@@ -491,7 +492,13 @@ async fn send_daemon_command(
         }
         Ok(Err(join_err)) => Err(format!("Daemon thread error: {}", join_err)),
         Err(_elapsed) => {
-            eprintln!("[DAEMON] {} Command timed out (daemon unresponsive)", chrono_timestamp());
+            let ts = chrono_timestamp();
+            eprintln!("[DAEMON] [{ts}] Command timed out, closing stdin to unblock daemon...");
+            // Close stdin to unblock the daemon (daemon sees EOF → exits cleanly)
+            if let Ok(mut guard) = child_clone.lock() {
+                let _ = guard.stdin.take();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             Err("El daemon dejó de responder".to_string())
         }
     }
