@@ -291,8 +291,13 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                                 );
                                 if is_allowed {
                                     if let Ok(mut file) = File::open(&file_path) {
-                                        let metadata = file.metadata().unwrap();
-                                        let file_size = metadata.len();
+                                        let file_size = match file.metadata() {
+                                            Ok(m) => m.len(),
+                                            Err(_) => {
+                                                let _ = write!(stream, "HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
+                                                return;
+                                            }
+                                        };
                                         
                                         let mut range_start = 0;
                                         let mut range_end = file_size - 1;
@@ -498,7 +503,18 @@ async fn send_daemon_command(
             if let Ok(mut guard) = child_clone.lock() {
                 let _ = guard.stdin.take();
             }
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            // Wait for the daemon to exit (releases mutexes held by spawned task)
+            for _ in 0..20 {
+                let exited = match child_clone.lock() {
+                    Ok(mut guard) => guard.try_wait().ok().flatten().is_some(),
+                    Err(_) => true,
+                };
+                if exited {
+                    eprintln!("[DAEMON] [{ts}] Daemon exited after stdin close");
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
             Err("El daemon dejó de responder".to_string())
         }
     }
@@ -1545,27 +1561,28 @@ pub fn run() {
                 app.manage(DiscordState { client: Mutex::new(None) });
 
                 // ─── Daemon Watchdog ─────────────────────────────────
+                // Uses child.try_wait() to avoid interfering with running commands
                 let watchdog_handle = handle.clone();
                 std::thread::spawn(move || {
                     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime for watchdog");
                     rt.block_on(async {
-                        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+                        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
                         // Skip first tick so the daemon has time to initialize
                         interval.tick().await;
                         loop {
                             interval.tick().await;
-                            let daemon = match watchdog_handle.try_state::<Arc<DaemonProcess>>() {
-                                Some(s) => s.inner().clone(),
-                                None => continue,
-                            };
                             let child = match watchdog_handle.try_state::<Arc<Mutex<std::process::Child>>>() {
                                 Some(s) => s.inner().clone(),
                                 None => continue,
                             };
-                            if send_daemon_command(daemon, child, r#"{"action":"ping"}"#.to_string()).await.is_err() {
+                            let exited = match child.lock() {
+                                Ok(mut guard) => guard.try_wait().unwrap_or(Some(std::process::ExitStatus::default())).is_some(),
+                                Err(_) => true,
+                            };
+                            if exited {
                                 let ts = chrono_timestamp();
-                                eprintln!("[WATCHDOG] [{ts}] Daemon not responding, restarting...");
-                                if let Err(e) = restart_daemon(&watchdog_handle, "ping_timeout") {
+                                eprintln!("[WATCHDOG] [{ts}] Daemon process exited, restarting...");
+                                if let Err(e) = restart_daemon(&watchdog_handle, "process_exited") {
                                     eprintln!("[WATCHDOG] [{ts}] Failed to restart daemon: {e}");
                                 } else {
                                     eprintln!("[WATCHDOG] [{ts}] Daemon restarted successfully");
