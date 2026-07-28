@@ -439,10 +439,10 @@ fun main(args: Array<String>) {
                                 YouTube.poToken = PoTokenGenerator.generateColdStartToken(newVisitorData)
                                 YouTube.poTokenGvs = PoTokenGenerator.generateSessionToken(newVisitorData)
                                 YouTube.poTokenPlayer = PoTokenGenerator.generateColdStartToken(newVisitorData, "player")
-                                System.err.println("[DAEMON] Tokens refreshed automatically")
+                                System.err.println("[DAEMON] [${System.currentTimeMillis()}] Tokens refreshed automatically")
                             }
                         } catch (e: Exception) {
-                            System.err.println("[DAEMON] Token refresh failed: ${e.message}")
+                            System.err.println("[DAEMON] [${System.currentTimeMillis()}] Token refresh failed: ${e.message}")
                         }
                     }
                 }
@@ -452,7 +452,7 @@ fun main(args: Array<String>) {
                 while (true) {
                     try {
                         val line = reader.readLine() ?: run {
-                            System.err.println("[DAEMON] stdin closed, exiting")
+                            System.err.println("[DAEMON] [${System.currentTimeMillis()}] stdin closed, exiting")
                             return@runBlocking
                         }
                         if (line.isBlank()) continue
@@ -766,10 +766,11 @@ fun main(args: Array<String>) {
                         println(response)
                         System.out.flush()
                     } catch (e: Exception) {
-                        System.err.println("[DAEMON] Unexpected error in main loop: ${e.message}")
+                        val now = System.currentTimeMillis()
+                        System.err.println("[DAEMON] [$now] Unexpected error in main loop: ${e.message}")
                         stdinErrorCount++
                         if (stdinErrorCount > 5) {
-                            System.err.println("[DAEMON] Too many stdin errors, exiting")
+                            System.err.println("[DAEMON] [$now] Too many stdin errors, exiting")
                             return@runBlocking
                         }
                         try {

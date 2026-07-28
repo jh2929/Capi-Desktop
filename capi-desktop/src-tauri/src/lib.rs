@@ -14,6 +14,11 @@ use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
 
+fn chrono_timestamp() -> String {
+    let dur = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    format!("{}.{:03}", dur.as_secs(), dur.subsec_millis())
+}
+
 struct LocalServerState {
     port: u16,
 }
@@ -481,11 +486,12 @@ async fn send_daemon_command(
     match result {
         Ok(Ok(Ok(resp))) => Ok(resp),
         Ok(Ok(Err(e))) => {
-            eprintln!("[DAEMON] Pipe error (daemon likely dead): {e}");
+            eprintln!("[DAEMON] {} Pipe error (daemon likely dead): {e}", chrono_timestamp());
             Err("El daemon dejó de responder".to_string())
         }
         Ok(Err(join_err)) => Err(format!("Daemon thread error: {}", join_err)),
         Err(_elapsed) => {
+            eprintln!("[DAEMON] {} Command timed out (daemon unresponsive)", chrono_timestamp());
             Err("El daemon dejó de responder".to_string())
         }
     }
@@ -568,7 +574,7 @@ fn spawn_daemon_process(binary: &PathBuf) -> Result<(DaemonProcess, std::process
     }, child))
 }
 
-fn restart_daemon(app: &tauri::AppHandle) -> Result<(), String> {
+fn restart_daemon(app: &tauri::AppHandle, reason: &str) -> Result<(), String> {
     // Reap old zombie before spawning new daemon
     if let Some(old_child) = app.try_state::<Arc<Mutex<std::process::Child>>>() {
         if let Ok(mut guard) = old_child.inner().lock() {
@@ -580,8 +586,9 @@ fn restart_daemon(app: &tauri::AppHandle) -> Result<(), String> {
     let (daemon, child) = spawn_daemon_process(&binary)?;
     app.manage(Arc::new(daemon));
     app.manage(Arc::new(Mutex::new(child)));
-    println!("[DAEMON] Restarted successfully");
-    let _ = app.emit("daemon-restarted", ());
+    let ts = chrono_timestamp();
+    println!("[DAEMON] [{ts}] Restarted successfully (reason: {reason})");
+    let _ = app.emit("daemon-restarted", serde_json::json!({"timestamp": ts, "reason": reason}));
     Ok(())
 }
 
@@ -594,7 +601,7 @@ async fn buscar_cancion(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<Daem
     let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
     if let Err(ref e) = result {
         if e == "El daemon dejó de responder" {
-            restart_daemon(&app)?;
+            restart_daemon(&app, "search_timeout")?;
             let new_daemon = app.state::<Arc<DaemonProcess>>();
             let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
             let cmd2 = serde_json::json!({
@@ -616,7 +623,7 @@ async fn obtener_stream(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<Daem
     let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
     if let Err(ref e) = result {
         if e == "El daemon dejó de responder" {
-            restart_daemon(&app)?;
+            restart_daemon(&app, "stream_timeout")?;
             let new_daemon = app.state::<Arc<DaemonProcess>>();
             let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
             let cmd2 = serde_json::json!({
@@ -638,7 +645,7 @@ async fn obtener_playlist(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<Da
     let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
     if let Err(ref e) = result {
         if e == "El daemon dejó de responder" {
-            restart_daemon(&app)?;
+            restart_daemon(&app, "playlist_timeout")?;
             let new_daemon = app.state::<Arc<DaemonProcess>>();
             let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
             let cmd2 = serde_json::json!({
@@ -817,7 +824,7 @@ async fn obtener_home(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<Daemon
     let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
     if let Err(ref e) = result {
         if e == "El daemon dejó de responder" {
-            restart_daemon(&app)?;
+            restart_daemon(&app, "home_timeout")?;
             let new_daemon = app.state::<Arc<DaemonProcess>>();
             let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
             let cmd2 = serde_json::json!({
@@ -839,7 +846,7 @@ async fn obtener_artista(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<Dae
     let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
     if let Err(ref e) = result {
         if e == "El daemon dejó de responder" {
-            restart_daemon(&app)?;
+            restart_daemon(&app, "artist_timeout")?;
             let new_daemon = app.state::<Arc<DaemonProcess>>();
             let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
             let cmd2 = serde_json::json!({
@@ -860,7 +867,7 @@ async fn obtener_explorar(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<Da
     let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
     if let Err(ref e) = result {
         if e == "El daemon dejó de responder" {
-            restart_daemon(&app)?;
+            restart_daemon(&app, "explore_timeout")?;
             let new_daemon = app.state::<Arc<DaemonProcess>>();
             let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
             let cmd2 = serde_json::json!({
@@ -886,7 +893,7 @@ async fn obtener_letras(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<Daem
     let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
     if let Err(ref e) = result {
         if e == "El daemon dejó de responder" {
-            restart_daemon(&app)?;
+            restart_daemon(&app, "lyrics_timeout")?;
             let new_daemon = app.state::<Arc<DaemonProcess>>();
             let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
             let cmd2 = serde_json::json!({
@@ -912,7 +919,7 @@ async fn obtener_nuevos_lanzamientos(app: tauri::AppHandle, daemon: tauri::State
     let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
     if let Err(ref e) = result {
         if e == "El daemon dejó de responder" {
-            restart_daemon(&app)?;
+            restart_daemon(&app, "new_releases_timeout")?;
             let new_daemon = app.state::<Arc<DaemonProcess>>();
             let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
             let cmd2 = serde_json::json!({
@@ -1549,11 +1556,12 @@ pub fn run() {
                                 None => continue,
                             };
                             if send_daemon_command(daemon, child, r#"{"action":"ping"}"#.to_string()).await.is_err() {
-                                eprintln!("[WATCHDOG] Daemon not responding, restarting...");
-                                if let Err(e) = restart_daemon(&watchdog_handle) {
-                                    eprintln!("[WATCHDOG] Failed to restart daemon: {e}");
+                                let ts = chrono_timestamp();
+                                eprintln!("[WATCHDOG] [{ts}] Daemon not responding, restarting...");
+                                if let Err(e) = restart_daemon(&watchdog_handle, "ping_timeout") {
+                                    eprintln!("[WATCHDOG] [{ts}] Failed to restart daemon: {e}");
                                 } else {
-                                    eprintln!("[WATCHDOG] Daemon restarted successfully");
+                                    eprintln!("[WATCHDOG] [{ts}] Daemon restarted successfully");
                                 }
                             }
                         }
