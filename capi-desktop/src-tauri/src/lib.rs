@@ -612,6 +612,27 @@ fn restart_daemon(app: &tauri::AppHandle, reason: &str) -> Result<(), String> {
     let ts = chrono_timestamp();
     println!("[DAEMON] [{ts}] Restarted successfully (reason: {reason})");
     let _ = app.emit("daemon-restarted", serde_json::json!({"timestamp": ts, "reason": reason}));
+
+    // Fire-and-forget: refresh PO tokens on the fresh daemon (they regenerate at startup,
+    // but a second refresh heals stale tokens and warms the YouTube session)
+    let app2 = app.clone();
+    let daemon2 = app.state::<Arc<DaemonProcess>>().inner().clone();
+    let child2 = app.state::<Arc<Mutex<std::process::Child>>>().inner().clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        let rt = tokio::runtime::Runtime::new();
+        if let Ok(rt) = rt {
+            rt.block_on(async {
+                let _ = send_daemon_command(
+                    daemon2,
+                    child2,
+                    r#"{"action":"refresh-tokens"}"#.to_string(),
+                ).await;
+                println!("[DAEMON] [{ts}] Post-restart token refresh completed");
+                let _ = app2.emit("daemon-ready", ());
+            });
+        }
+    });
     Ok(())
 }
 

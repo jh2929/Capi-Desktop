@@ -238,6 +238,10 @@ function App() {
   const [tracks, setTracks] = useState<Track[]>([]);
   const [currentTrack, setCurrentTrack] = useState<Track | null>(null);
   const [activeQueue, setActiveQueue] = useState<Track[]>([]);
+  const currentTrackRef = useRef<Track | null>(null);
+  const activeQueueRef = useRef<Track[]>([]);
+  useEffect(() => { currentTrackRef.current = currentTrack; }, [currentTrack]);
+  useEffect(() => { activeQueueRef.current = activeQueue; }, [activeQueue]);
   const [isPlaying, setIsPlaying] = useState(false);
   const [streamUrl, setStreamUrl] = useState<string | null>(null);
   const [isShuffle, setIsShuffle] = useState(false);
@@ -896,6 +900,31 @@ function App() {
       }
     });
     return () => { unlisten.then(f => f()); };
+  }, []);
+
+  // ─── Daemon lifecycle listener ──────────────────────────────────
+  useEffect(() => {
+    const unlistenRestart = listen<{ timestamp: string; reason: string }>("daemon-restarted", (event) => {
+      console.log(`[DAEMON] Restarted (${event.payload.reason}) at ${event.payload.timestamp}`);
+      // Old stream URLs belonged to the previous daemon session — drop them
+      streamCacheRef.current = {};
+      showToast("Motor de streaming reiniciado — reintentando...");
+      // If a track failed to load, retry the current one automatically
+      const cur = currentTrackRef.current;
+      if (cur && audioRef.current && audioRef.current.paused) {
+        playTrack(cur, activeQueueRef.current.length > 0 ? activeQueueRef.current : undefined);
+      }
+    });
+    const unlistenReady = listen("daemon-ready", () => {
+      showToast("Motor de streaming listo");
+      if (currentTrackRef.current && audioRef.current && audioRef.current.paused) {
+        playTrack(currentTrackRef.current, activeQueueRef.current.length > 0 ? activeQueueRef.current : undefined);
+      }
+    });
+    return () => {
+      unlistenRestart.then(f => f());
+      unlistenReady.then(f => f());
+    };
   }, []);
 
   // ─── Emit media state to Rust backend every 3s ────────────────────
