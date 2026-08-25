@@ -8,13 +8,35 @@ import {
   Trash2, Home, Library, Download, Shuffle, ListPlus, Disc3, FolderOpen,
   MoreVertical, X, Sparkle, GripVertical, Copy, RefreshCw,
   User, Radio, Mic2, LayoutGrid, List, Plus, Bell,
-  Moon, Timer, BarChart3, Languages, RotateCcw, Trophy, Users, Repeat, Repeat1, Lock, Unlock, Upload, Pencil, HardDrive
+  Moon, Timer, BarChart3, Languages, RotateCcw, Trophy, Users, Repeat, Repeat1, Lock, Unlock, Upload, Pencil, HardDrive,
+  FileText
 } from "lucide-react";
 import "./App.css";
 import { t, Locale, LOCALE_NAMES, TranslationKeys } from "./i18n";
 import SafeImage from "./SafeImage";
 import { recordPlayEvent, getRecommendationQueries, getTopArtistsFromDB, getTopTracksFromDB, ArtistAffinity, getPersonalizedHomeSections, addListenedTime } from "./recommendations";
 import { enable, disable, isEnabled } from "@tauri-apps/plugin-autostart";
+import { diagnostics, DiagnosticModal } from "./diagnostics";
+import type { DiagnosticReport } from "./diagnostics";
+import { parseAndDetectLyrics } from "./lyricsParser";
+import { castManager, CastSession } from "./castManager";
+
+const GlassesIcon = ({ className = "w-4 h-4" }: { className?: string }) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <circle cx="6" cy="14" r="4" />
+    <circle cx="18" cy="14" r="4" />
+    <path d="M14 14a2 2 0 0 0-4 0" />
+    <path d="M2.5 12.5 4 4" />
+    <path d="M21.5 12.5 20 4" />
+  </svg>
+);
+
+const CastIcon = ({ className = "w-4 h-4" }: { className?: string }) => (
+  <svg className={className} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+    <path d="M2 16.1A5 5 0 0 1 5.9 20M2 12.05A9 9 0 0 1 9.95 20M2 8V6a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-6" />
+    <line x1="2" y1="20" x2="2.01" y2="20" strokeWidth="3" strokeLinecap="round" />
+  </svg>
+);
 
 interface NavState {
   tab: "home" | "explore" | "buscar" | "biblioteca" | "playlists" | "favoritos" | "artist" | "album_view" | "settings" | "perfil" | "lanzamientos" | "download_manager" | "stats";
@@ -385,6 +407,7 @@ function App() {
   const [showImportPlaylistModal, setShowImportPlaylistModal] = useState(false);
   const [importPlaylistUrl, setImportPlaylistUrl] = useState("");
   const [errorModal, setErrorModal] = useState<{ message: string } | null>(null);
+  const [diagnosticReport, setDiagnosticReport] = useState<DiagnosticReport | null>(null);
   const streamCacheRef = useRef<Record<string, string>>({});
   // const playCountCacheRef = useRef<Record<string, number>>({});
   const nextRandomIndexRef = useRef<number | null>(null);
@@ -506,6 +529,19 @@ function App() {
   const [parsedLyrics, setParsedLyrics] = useState<LyricLine[]>([]);
   const [currentLyricIndex, setCurrentLyricIndex] = useState<number>(-1);
   const lyricsContainerRef = useRef<HTMLDivElement | null>(null);
+  const [isLyricsSynced, setIsLyricsSynced] = useState<boolean>(false);
+  const [lyricsDisplayMode, setLyricsDisplayMode] = useState<"synced" | "plain">("synced");
+  const [lyricsLoadingProvider, setLyricsLoadingProvider] = useState<string | null>(null);
+  const lyricsReqIdRef = useRef<number>(0);
+  const lyricsCacheRef = useRef<Map<string, { lyrics: string; provider: string; isSynced: boolean; lines: LyricLine[] }>>(new Map());
+
+  // Focus Mode
+  const [isFocusMode, setIsFocusMode] = useState<boolean>(false);
+
+  // Cast state
+  const [showCastModal, setShowCastModal] = useState<boolean>(false);
+  const [castSession, setCastSession] = useState<CastSession>(castManager.getSession());
+  const [manualCastIp, setManualCastIp] = useState<string>("");
 
   // Player tabs: queue, lyrics, related
   const [playerTab, setPlayerTab] = useState<"queue" | "lyrics" | "related">("lyrics");
@@ -549,6 +585,28 @@ function App() {
     }).catch(err => {
       console.error("Error al obtener el puerto del servidor local:", err);
     });
+  }, []);
+
+  // Subscribe to Cast Session
+  useEffect(() => {
+    const unsub = castManager.subscribe(sess => {
+      setCastSession(sess);
+    });
+    return unsub;
+  }, []);
+
+  // Initialize the diagnostics/observability layer and gather system info
+  useEffect(() => {
+    diagnostics.init();
+    invoke<string>("obtener_info_sistema")
+      .then(raw => {
+        try {
+          diagnostics.setBackendInfo(JSON.parse(raw));
+        } catch (e) {
+          console.warn("[DIAG] No se pudo parsear la info del sistema:", e);
+        }
+      })
+      .catch(err => console.warn("[DIAG] No se pudo obtener la info del sistema:", err));
   }, []);
 
   // Search suggestions & history
@@ -906,20 +964,13 @@ function App() {
   useEffect(() => {
     const unlistenRestart = listen<{ timestamp: string; reason: string }>("daemon-restarted", (event) => {
       console.log(`[DAEMON] Restarted (${event.payload.reason}) at ${event.payload.timestamp}`);
-      // Old stream URLs belonged to the previous daemon session — drop them
+      diagnostics.onDaemonRestarted(event.payload.reason, event.payload.timestamp);
       streamCacheRef.current = {};
-      showToast("Motor de streaming reiniciado — reintentando...");
-      // If a track failed to load, retry the current one automatically
-      const cur = currentTrackRef.current;
-      if (cur && audioRef.current && audioRef.current.paused) {
-        playTrack(cur, activeQueueRef.current.length > 0 ? activeQueueRef.current : undefined);
-      }
+      showToast("Motor de streaming reiniciado");
     });
     const unlistenReady = listen("daemon-ready", () => {
+      diagnostics.onDaemonReady();
       showToast("Motor de streaming listo");
-      if (currentTrackRef.current && audioRef.current && audioRef.current.paused) {
-        playTrack(currentTrackRef.current, activeQueueRef.current.length > 0 ? activeQueueRef.current : undefined);
-      }
     });
     return () => {
       unlistenRestart.then(f => f());
@@ -942,9 +993,11 @@ function App() {
         volume,
         shuffle: isShuffle,
         repeat: repeatMode,
+        stream_url: streamUrl || "",
+        track_id: currentTrack.id || "",
       }
     }).catch(() => {});
-  }, [currentTrack, isPlaying, currentTime, duration, volume, isShuffle, repeatMode]);
+  }, [currentTrack, isPlaying, currentTime, duration, volume, isShuffle, repeatMode, streamUrl]);
 
   useEffect(() => {
     emitMediaState();
@@ -1222,17 +1275,21 @@ function App() {
   const parsedLyricsRef = useRef(parsedLyrics);
   parsedLyricsRef.current = parsedLyrics;
 
+  const lastScrolledIndexRef = useRef<number>(-1);
+
   const syncLyricsScroll = useCallback((force = false) => {
+    if (lyricsDisplayMode === "plain" || !isLyricsSynced) return;
     const curLyrics = parsedLyricsRef.current;
     const curTime = currentTimeRef.current;
     if (curLyrics.length === 0) return;
     const index = curLyrics.findIndex((line, i) => {
       const nextLine = curLyrics[i + 1];
-      return curTime >= line.time && (!nextLine || curTime < nextLine.time);
+      return line.time >= 0 && curTime >= line.time && (!nextLine || nextLine.time < 0 || curTime < nextLine.time);
     });
     if (index !== -1) {
       setCurrentLyricIndex(index);
-      if (lyricsScrollLocked || force) {
+      if ((lyricsScrollLocked || force) && (force || index !== lastScrolledIndexRef.current)) {
+        lastScrolledIndexRef.current = index;
         const activeEl = document.getElementById(`lyric-line-${index}`);
         if (activeEl && lyricsContainerRef.current) {
           ignoreNextScrollRef.current = true;
@@ -1241,16 +1298,17 @@ function App() {
           }
           autoScrollTimeoutRef.current = window.setTimeout(() => {
             ignoreNextScrollRef.current = false;
-          }, 800);
+          }, 350);
 
+          const targetTop = activeEl.offsetTop - lyricsContainerRef.current.clientHeight / 2 + activeEl.clientHeight / 2;
           lyricsContainerRef.current.scrollTo({
-            top: activeEl.offsetTop - lyricsContainerRef.current.clientHeight / 2 + activeEl.clientHeight / 2,
-            behavior: "smooth"
+            top: Math.max(0, targetTop),
+            behavior: force ? "auto" : "smooth"
           });
         }
       }
     }
-  }, [lyricsScrollLocked]);
+  }, [lyricsScrollLocked, lyricsDisplayMode, isLyricsSynced]);
 
   // Synchronized lyrics updater
   useEffect(() => {
@@ -1578,10 +1636,28 @@ function App() {
     }
   };
 
-  const fetchLyrics = async (track: Track, providerOverride?: string) => {
-    setLyricsText("Cargando letras...");
+  const fetchLyrics = async (track: Track, providerOverride?: string, forceRefresh: boolean = false) => {
+    const reqId = ++lyricsReqIdRef.current;
+    const providerKey = providerOverride || "auto";
+    const cacheKey = `${track.id}::${providerKey}`;
+
+    if (!forceRefresh && lyricsCacheRef.current.has(cacheKey)) {
+      const cached = lyricsCacheRef.current.get(cacheKey)!;
+      setLyricsProvider(cached.provider);
+      setLyricsText(cached.lyrics);
+      setIsLyricsSynced(cached.isSynced);
+      setParsedLyrics(cached.lines);
+      setCurrentLyricIndex(-1);
+      setLyricsLoadingProvider(null);
+      return;
+    }
+
+    setLyricsLoadingProvider(providerOverride || "Automático");
+    setLyricsText(providerOverride ? `Buscando letras en ${providerOverride}...` : "Cargando letras...");
     setParsedLyrics([]);
     setCurrentLyricIndex(-1);
+    setIsLyricsSynced(false);
+
     try {
       const response = await invoke<string>("obtener_letras", {
         id: track.id,
@@ -1591,40 +1667,43 @@ function App() {
         duration: Math.round(track.duration),
         provider: providerOverride || null
       });
+
+      // Ignore response if a newer request was dispatched
+      if (reqId !== lyricsReqIdRef.current) return;
+
       const parsed = JSON.parse(response);
       if (parsed && parsed.lyrics) {
-        if (parsed.provider) setLyricsProvider(parsed.provider);
-        const text = parsed.lyrics;
-        setLyricsText(text);
-        const lines = text.split("\n");
-        const lrcLines: LyricLine[] = [];
-        lines.forEach((line: string) => {
-          const timeReg = /\[(\d+):(\d+)(?:\.(\d+))?\]/;
-          const match = timeReg.exec(line);
-          if (match) {
-            const min = parseInt(match[1]);
-            const sec = parseInt(match[2]);
-            const ms = match[3] ? parseInt(match[3]) : 0;
-            const divisor = Math.pow(10, match[3]?.length ?? 2);
-            const time = min * 60 + sec + ms / divisor;
-            const rawText = line.replace(timeReg, "").trim();
-            lrcLines.push({ time, text: rawText });
-          } else {
-            lrcLines.push({ time: -1, text: line.trim() });
-          }
+        const activeProv = parsed.provider || providerOverride || "Auto";
+        setLyricsProvider(activeProv);
+        const rawText = parsed.lyrics;
+        setLyricsText(rawText);
+
+        const detected = parseAndDetectLyrics(rawText, track.duration);
+        setIsLyricsSynced(detected.isSynced);
+        setParsedLyrics(detected.lines);
+
+        // Cache result for quick switching
+        lyricsCacheRef.current.set(cacheKey, {
+          lyrics: rawText,
+          provider: activeProv,
+          isSynced: detected.isSynced,
+          lines: detected.lines
         });
-        const syncedLines = lrcLines.filter(l => l.time >= 0);
-        if (syncedLines.length > 0) {
-          setParsedLyrics(syncedLines.sort((a, b) => a.time - b.time));
-        } else {
-          setParsedLyrics(lrcLines.map((l, i) => ({ time: i * 5, text: l.text })));
-        }
       } else {
-        setLyricsText("Letras no disponibles.");
+        setLyricsText(providerOverride ? `No se encontraron letras en ${providerOverride}.` : "Letras no disponibles.");
+        setParsedLyrics([]);
+        setIsLyricsSynced(false);
       }
     } catch (e) {
+      if (reqId !== lyricsReqIdRef.current) return;
       setLyricsText("No se pudieron cargar las letras.");
-      console.error(e);
+      setParsedLyrics([]);
+      setIsLyricsSynced(false);
+      console.error("[Lyrics] Error fetching lyrics:", e);
+    } finally {
+      if (reqId === lyricsReqIdRef.current) {
+        setLyricsLoadingProvider(null);
+      }
     }
   };
 
@@ -1986,17 +2065,25 @@ function App() {
     { code: "it", name: "Italiano" },
     { code: "ja", name: "日本語" },
     { code: "ko", name: "한국어" },
+    { code: "zh", name: "中文" },
+    { code: "ru", name: "Русский" },
   ];
 
-  const translateLyrics = async (targetLang: string = translationLang) => {
+  const translateLyrics = async (targetLang: string = translationLang || "es") => {
     if (!targetLang || (parsedLyrics.length === 0 && !lyricsText)) return;
     setTranslating(true);
     setLyricsMenuOpen(false);
+    setShowLangSelector(false);
     try {
       const lines = parsedLyrics.length > 0
         ? parsedLyrics.map(l => l.text).filter(t => t.trim())
         : lyricsText.split("\n").filter(l => l.trim());
       
+      if (lines.length === 0) {
+        setTranslating(false);
+        return;
+      }
+
       // Translate in chunks of 10 lines to avoid API limits
       const translatedLines: string[] = [];
       for (let i = 0; i < lines.length; i += 10) {
@@ -2025,15 +2112,17 @@ function App() {
         }
         setTranslatedLyrics(mapped);
       } else {
-        setTranslatedLyrics(translatedLines.map((t, i) => ({ time: i * 5, text: t })));
+        setTranslatedLyrics(translatedLines.map(t => ({ time: -1, text: t })));
       }
       setShowTranslation(true);
+      setTranslationLang(targetLang);
       showToast(`Letras traducidas a ${TRANSLATION_LANGS.find(l => l.code === targetLang)?.name || targetLang}`);
     } catch (e) {
       console.error("Translation error:", e);
       showToast("Error al traducir las letras");
+    } finally {
+      setTranslating(false);
     }
-    setTranslating(false);
   };
 
   // Reset translation when track changes
@@ -2057,6 +2146,9 @@ function App() {
     // Track play count for cache threshold — DISABLED
     // playCountCacheRef.current[track.id] = (playCountCacheRef.current[track.id] || 0) + 1;
 
+    // Señal al sistema de diagnóstico: nueva solicitud de reproducción
+    diagnostics.onPlaybackRequested(track);
+
     // Flush listened time for previous track before starting new one
     if (listenedAccumRef.current.trackId && listenedAccumRef.current.ms > 0) {
       addListenedTime(listenedAccumRef.current.trackId, listenedAccumRef.current.ms);
@@ -2074,6 +2166,7 @@ function App() {
         console.log(`[PLAY] Detected playlist ID: ${track.id}, resolving songs...`);
         setLoading(true);
         setBuffering(true);
+        diagnostics.onPlaylistResolveStarted();
         try {
           const playlistJson = await invoke<string>("obtener_playlist", { id: track.id });
           const songs: Track[] = JSON.parse(playlistJson);
@@ -2081,13 +2174,16 @@ function App() {
             console.log(`[PLAY] Resolved ${songs.length} songs from playlist, playing first: ${songs[0].title}`);
             setLoading(false);
             setBuffering(false);
+            diagnostics.onPlaylistResolved(songs.length);
             return playTrack(songs[0], songs);
           } else {
             throw new Error("Playlist vacía");
           }
         } catch (err: any) {
           console.error("[PLAY] Failed to resolve playlist:", err);
-          setErrorModal({ message: "Error al cargar la playlist: " + (err.message || err) });
+          diagnostics.onPlaylistResolveFailed(err);
+          diagnostics.onPlaybackFailed(track, err);
+          setDiagnosticReport(diagnostics.buildReport());
           setLoading(false);
           setBuffering(false);
           return;
@@ -2101,6 +2197,7 @@ function App() {
         setBuffering(true);
       }
       setCurrentTrack(track);
+      diagnostics.onMetadataReady(track);
       console.timeLog(`[PLAY-TIMING] ${track.title}`, 'state updates done');
 
       if (queueList.length > 0) {
@@ -2117,18 +2214,28 @@ function App() {
       recordPlayEvent(track, 0).catch(err => console.error("recordPlayEvent failed:", err));
       
       let stream: string;
+      let streamSource: "local" | "download" | "cache" | "backend" = "backend";
+      const resolveStart = performance.now();
       if (track.id.startsWith("local://")) {
+        streamSource = "local";
+        diagnostics.onStreamResolveStarted(streamSource);
         const path = track.id.replace("local://", "");
         stream = `http://127.0.0.1:${localPort}/play?path=${encodeURIComponent(path)}`;
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'using local custom folder file');
       } else if (downloads[track.id]) {
+        streamSource = "download";
+        diagnostics.onStreamResolveStarted(streamSource);
         const path = downloads[track.id];
         stream = `http://127.0.0.1:${localPort}/play?path=${encodeURIComponent(path)}`;
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'using downloaded file');
       } else if (streamCacheRef.current[track.id]) {
+        streamSource = "cache";
+        diagnostics.onStreamResolveStarted(streamSource);
         stream = streamCacheRef.current[track.id];
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'using cached stream URL');
       } else {
+        streamSource = "backend";
+        diagnostics.onStreamResolveStarted(streamSource);
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'calling obtener_stream...');
         let resultJson: string;
         let retries = 0;
@@ -2139,15 +2246,18 @@ function App() {
             if (retries < 2) {
               retries++;
               console.warn(`[PLAY] Stream retry ${retries} for ${track.title}`);
+              diagnostics.onStreamResolveRetry(retries);
               await new Promise(r => setTimeout(r, 1500));
               continue;
             }
+            diagnostics.onStreamResolveFailed(e);
             throw e;
           }
           break;
         }
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'obtener_stream returned');
         stream = resultJson!;
+        let parsedError: Error | null = null;
         try {
           const parsed = JSON.parse(resultJson!);
           if (parsed.error) {
@@ -2157,11 +2267,15 @@ function App() {
           else if (parsed.url) stream = parsed.url;
         } catch (err: any) {
           if (err.message && !err.message.includes("Unexpected token")) {
-            throw err;
+            parsedError = err;
           }
           if (stream.startsWith('"') && stream.endsWith('"')) {
             stream = stream.substring(1, stream.length - 1);
           }
+        }
+        if (parsedError) {
+          diagnostics.onStreamResolveFailed(parsedError);
+          throw parsedError;
         }
 
         // Wrap the YouTube stream URL in our local HTTP server
@@ -2182,18 +2296,30 @@ function App() {
         // }
       }
 
+      // Validar la URL final del stream y registrarla en el diagnóstico
+      const validation = diagnostics.validateStreamUrl(stream);
+      diagnostics.onStreamResolved(stream, streamSource, performance.now() - resolveStart, validation);
+      if (!validation.ok) {
+        throw new Error(validation.summary);
+      }
+
       setStreamUrl(stream);
       console.timeLog(`[PLAY-TIMING] ${track.title}`, 'setting audio.src...');
       
       if (audioRef.current) {
+        diagnostics.onPlayerInitStarted(stream);
         audioRef.current.src = stream;
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'calling audio.play()...');
+        diagnostics.onPlayerPlayCalled();
         audioRef.current.play().then(() => {
           console.timeEnd(`[PLAY-TIMING] ${track.title}`);
           console.log(`[PLAY-TIMING] ✅ Playback started for: ${track.title}`);
           setIsPlaying(true);
           setBuffering(false);
           setLoading(false);
+          diagnostics.onPlaybackStarted(track);
+          // Transmit track stream to connected Cast device if active
+          castManager.transmitTrack({ id: track.id, title: track.title, artist: track.artist, url: stream, thumbnail: track.thumbnail });
           // Start listening time accumulator
           listenedAccumRef.current = { trackId: track.id, ms: 0 };
           if (listenedIntervalRef.current) clearInterval(listenedIntervalRef.current);
@@ -2203,16 +2329,18 @@ function App() {
         }).catch(err => {
           console.timeEnd(`[PLAY-TIMING] ${track.title}`);
           console.error("Playback error:", err, "for stream:", stream);
-          if (stream.startsWith("http://127.0.0.1")) {
-            setErrorModal({ message: "No se pudo reproducir el archivo local: " + err.message });
-          }
+          diagnostics.onPlaybackFailed(track, err);
+          setDiagnosticReport(diagnostics.buildReport());
           setBuffering(false);
           setLoading(false);
         });
       }
     } catch (error) {
       console.error("Stream acquisition failed:", error);
-      setErrorModal({ message: "Error al cargar la canción." });
+      diagnostics.onPlaybackFailed(track, error);
+      const report = diagnostics.buildReport();
+      console.log("[DIAG] modal de diagnóstico:", report.summary.name);
+      setDiagnosticReport(report);
       setLoading(false);
       setBuffering(false);
     }
@@ -2999,11 +3127,15 @@ function App() {
       <audio
         ref={audioRef}
         onTimeUpdate={handleTimeUpdate}
-        onLoadedMetadata={handleLoadedMetadata}
+        onLoadedMetadata={() => {
+          handleLoadedMetadata();
+          diagnostics.onPlayerLoadedMetadata(audioRef.current?.duration ?? 0);
+        }}
         onPlay={() => setIsPlaying(true)}
         onPause={() => {
           setIsPlaying(false);
           setBuffering(false);
+          diagnostics.onPlayerPaused();
           if (listenedAccumRef.current.trackId && listenedAccumRef.current.ms > 0) {
             addListenedTime(listenedAccumRef.current.trackId, listenedAccumRef.current.ms);
             listenedAccumRef.current = { trackId: "", ms: 0 };
@@ -3013,16 +3145,49 @@ function App() {
             listenedIntervalRef.current = null;
           }
         }}
-        onWaiting={() => setBuffering(true)}
-        onPlaying={() => setBuffering(false)}
+        onWaiting={() => {
+          setBuffering(true);
+          diagnostics.onPlayerWaiting();
+        }}
+        onPlaying={() => {
+          setBuffering(false);
+          diagnostics.onPlayerPlaying();
+        }}
         onSeeking={() => setBuffering(true)}
         onSeeked={() => setBuffering(false)}
-        onCanPlay={() => setBuffering(false)}
-        onStalled={() => setBuffering(false)}
+        onCanPlay={() => {
+          setBuffering(false);
+          diagnostics.onPlayerCanPlay();
+        }}
+        onStalled={() => {
+          setBuffering(false);
+          diagnostics.onPlayerStalled();
+        }}
         onSuspend={() => setBuffering(false)}
         onEmptied={() => setBuffering(false)}
-        onError={() => setBuffering(false)}
+        onError={(e) => {
+          const target = e.currentTarget;
+          setBuffering(false);
+          diagnostics.onPlayerError({
+            code: target.error?.code ?? -1,
+            message: target.error?.message ?? "",
+            networkState: target.networkState,
+            readyState: target.readyState,
+          });
+          // Si la reproducción aún estaba en curso y el audio falla, cerrar la sesión
+          // y mostrar el diagnóstico (el evento 'Playing' nunca llegará).
+          if (diagnostics.getSessionStatus() === "running") {
+            const err = new Error(
+              `MediaError ${target.error?.code ?? -1}${target.error?.message ? `: ${target.error.message}` : ""}`
+            );
+            if (currentTrack) {
+              diagnostics.onPlaybackFailed(currentTrack, err);
+              setDiagnosticReport(diagnostics.buildReport());
+            }
+          }
+        }}
         onEnded={() => {
+          diagnostics.onPlayerEnded();
           if (sleepMode === "endOfTrack") {
             if (audioRef.current) { audioRef.current.pause(); }
             setIsPlaying(false);
@@ -6650,6 +6815,18 @@ function App() {
               )}
             </div>
 
+            {/* Cast Button in Mini Player */}
+            <button
+              onClick={(e) => { e.stopPropagation(); setShowCastModal(true); }}
+              className={`p-2 transition relative ${castSession.state === "connected" ? "text-brand-primary cast-active-pulse rounded-full" : "text-text-secondary hover:text-text-primary"}`}
+              title={castSession.state === "connected" ? `Transmitiendo en ${castSession.device?.name || "Dispositivo"}` : "Transmitir audio (Cast)"}
+            >
+              <CastIcon className="w-4 h-4" />
+              {castSession.state === "connected" && (
+                <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-green-400 rounded-full animate-ping" />
+              )}
+            </button>
+
             <button 
               onClick={(e) => { e.stopPropagation(); toggleMute(); }}
               className="text-text-secondary hover:text-text-primary transition"
@@ -6680,335 +6857,931 @@ function App() {
         {isPlayerExpanded && currentTrack && (
           <div 
             style={extractedColors ? { background: `radial-gradient(circle at center, ${extractedColors.primary}25 0%, #0c0a0f 100%)` } : {}}
-            className="absolute inset-0 bg-bg-dark/95 z-50 flex flex-col md:flex-row p-8 gap-8 items-center justify-start md:justify-center overflow-y-auto md:overflow-y-hidden animate-fade-in backdrop-blur-lg"
+            className={`absolute inset-0 bg-bg-dark/95 z-50 flex flex-col p-6 md:p-8 overflow-hidden animate-fade-in backdrop-blur-xl select-none ${isFocusMode ? "justify-between" : ""}`}
           >
-            <button 
-              onClick={() => setIsPlayerExpanded(false)}
-              className="fixed top-6 right-6 p-3 bg-white/5 hover:bg-white/10 text-white rounded-full transition z-[60]"
-            >
-              <ChevronDown className="w-6 h-6" />
-            </button>
-
             {/* Ambient Blurred Background Art */}
-            <div className="absolute inset-0 z-0 overflow-hidden filter blur-3xl opacity-20 pointer-events-none scale-125">
+            <div className="absolute inset-0 z-0 overflow-hidden filter blur-3xl opacity-25 pointer-events-none scale-125">
               <SafeImage src={currentTrack.thumbnail} alt="" className="w-full h-full object-cover" />
             </div>
 
-            {/* Left Panel: Cover Art & Controls */}
-            <div className="w-full md:w-1/2 flex flex-col items-center justify-center z-10 max-w-md gap-6 flex-shrink-0">
-              {/* Cover Art */}
-              <div 
-                onTouchStart={handleTouchStart}
-                onTouchMove={handleTouchMove}
-                onTouchEnd={handleTouchEnd}
-                className="relative aspect-square w-full max-w-[350px] rounded-3xl overflow-hidden shadow-2xl bg-black/40 border border-white/10 cursor-grab active:cursor-grabbing group"
-              >
-                <SafeImage trackId={currentTrack.id} src={currentTrack.thumbnail} alt={currentTrack.title} className="w-full h-full object-cover" />
-              </div>
-              
-              {/* Title & Artist stacked vertically */}
-              <div className="text-center w-full px-4 flex flex-col gap-1">
-                <h2 className="text-2xl font-bold tracking-tight text-white line-clamp-1">{currentTrack.title}</h2>
-                <p className="text-brand-primary font-semibold text-sm truncate">{currentTrack.artist}</p>
-              </div>
-
-              {/* Controls */}
-              <div className="flex items-center justify-center gap-6 w-full">
-                <button
-                  onClick={() => setRepeatMode(prev => prev === "none" ? "all" : prev === "all" ? "one" : "none")}
-                  className={`p-2 transition ${repeatMode !== "none" ? "text-brand-primary" : "text-text-secondary hover:text-white"}`}
-                  title={repeatMode === "none" ? "Repetición: Desactivada" : repeatMode === "one" ? "Repetición: Una canción" : "Repetición: Todo"}
-                >
-                  {repeatMode === "one" ? <Repeat1 className="w-5 h-5" /> : <Repeat className="w-5 h-5" />}
-                </button>
-                <button onClick={() => setIsShuffle(!isShuffle)} className={`p-2 transition ${isShuffle ? "text-brand-primary" : "text-text-secondary hover:text-white"}`}>
-                  <Shuffle className="w-5 h-5" />
-                </button>
-                <button onClick={playPrev} className="p-2 text-text-secondary hover:text-white transition">
-                  <SkipBack className="w-6 h-6" />
-                </button>
-                <button onClick={togglePlay} className="w-14 h-14 bg-brand-primary text-bg-dark rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition shadow-lg shadow-brand-primary/20">
-                  {isPlaying ? <Pause className="w-6 h-6 fill-current" /> : <Play className="w-6 h-6 fill-current" />}
-                </button>
-                <button onClick={playNext} className="p-2 text-text-secondary hover:text-white transition">
-                  <SkipForward className="w-6 h-6" />
-                </button>
-                <button onClick={() => toggleFavorite(currentTrack)} className="p-2 text-text-secondary hover:text-brand-primary transition">
-                  <Heart className={`w-5 h-5 ${isFavorite(currentTrack) ? "fill-brand-primary text-brand-primary" : ""}`} />
-                </button>
-                <button 
-                  onClick={(e) => { 
-                    e.stopPropagation(); 
-                    setContextMenuTrack(currentTrack); 
-                  }} 
-                  className="p-2 text-text-secondary hover:text-white transition"
-                  title="Más opciones"
-                >
-                  <MoreVertical className="w-5 h-5" />
-                </button>
-              </div>
-
-              {/* Time Slider */}
-              <div className="w-full flex items-center gap-3 px-4">
-                <span id="player-time-exp" className="text-xs text-text-secondary w-10 text-right cursor-pointer hover:text-brand-primary transition" onClick={toggleTimeDisplay}>{showRemaining ? `-${formatTime(Math.max(0, duration - currentTime))}` : formatTime(currentTime)}</span>
-                <input id="player-slider-exp" type="range" min="0" max={duration || 100} onChange={handleSeek}
-                  className="flex-1 accent-brand-primary h-1 bg-white/10 rounded-full cursor-pointer" />
-                <span className="text-xs text-text-secondary w-10 text-left">{formatTime(duration)}</span>
-              </div>
-            </div>
-
-            {/* Right Panel: Tabs (Queue / Lyrics / Related) */}
-            <div className="w-full md:w-1/2 h-[350px] md:h-[500px] flex flex-col z-10 max-w-lg border border-white/5 rounded-3xl bg-surface-dark/30 backdrop-blur-md overflow-hidden flex-shrink-0">
-              {/* Tab bar */}
-              <div className="flex border-b border-white/5">
-                {[
-                  { key: "queue" as const, label: "Siguiente", icon: <ListMusic className="w-3.5 h-3.5" /> },
-                  { key: "lyrics" as const, label: "Letra", icon: <Mic2 className="w-3.5 h-3.5" /> },
-                  { key: "related" as const, label: "Relacionado", icon: <Radio className="w-3.5 h-3.5" /> },
-                ].map(tab => (
-                  <button
-                    key={tab.key}
-                    onClick={() => setPlayerTab(tab.key)}
-                    className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 transition ${
-                      playerTab === tab.key ? "text-brand-primary border-b-2 border-brand-primary" : "text-text-secondary hover:text-text-primary"
-                    }`}
+            {/* ═══════════════════════════════════════════════════════════════
+                FOCUS MODE VIEW (Full Screen Inmersive Lyrics)
+                ═══════════════════════════════════════════════════════════════ */}
+            {isFocusMode ? (
+              <div className="relative z-10 flex flex-col h-full w-full max-w-5xl mx-auto justify-between">
+                {/* Focus Top Bar */}
+                <div className="w-full flex items-center justify-between py-2 border-b border-white/5">
+                  {/* Exit Focus Button */}
+                  <button 
+                    onClick={() => setIsFocusMode(false)}
+                    className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-white transition flex items-center gap-2 text-xs font-semibold"
+                    title="Salir del Modo Focus"
                   >
-                    {tab.icon} {tab.label}
+                    <ChevronLeft className="w-4 h-4 text-brand-primary" />
+                    <span className="hidden sm:inline">Salir de Focus</span>
                   </button>
-                ))}
-              </div>
 
-              {/* Tab content */}
-              <div className="flex-1 overflow-y-auto">
-                {playerTab === "queue" && (
-                  <div className="p-4 space-y-1">
-                    {activeQueue.length > 0 ? (
-                      activeQueue.map((track, idx) => (
-                        <div
-                          key={track.id}
-                          draggable
-                          onDragStart={(e) => handleDragStart(e, idx)}
-                          onDragOver={(e) => handleDragOver(e, idx)}
-                          onDrop={(e) => handleDrop(e, idx)}
-                          onDragEnd={() => { setDragIndex(null); setDragOverIndex(null); }}
-                          className={`flex items-center gap-3 p-2.5 rounded-xl transition cursor-pointer group ${
-                            currentTrack?.id === track.id ? "bg-brand-primary/10 border border-brand-primary/20" : "hover:bg-white/5"
-                          } ${dragIndex === idx ? "dragging-queue-item" : ""} ${dragOverIndex === idx ? "drag-over-queue-item" : ""}`}
-                          onClick={() => playTrack(track)}
-                        >
-                          <GripVertical className="w-4 h-4 text-text-secondary/50 drag-handle flex-shrink-0" />
-                          <SafeImage trackId={track.id} src={track.thumbnail} className="w-9 h-9 rounded-lg object-cover flex-shrink-0" alt={track.title} />
-                          <div className="min-w-0 flex-1">
-                            <p className={`text-sm truncate ${currentTrack?.id === track.id ? "text-brand-primary font-semibold" : "font-medium"}`}>{track.title}</p>
-                            <div className="flex items-center gap-1.5 min-w-0">
-                              <p className="text-xs text-text-secondary truncate">{track.artist}</p>
-                              {downloads[track.id] && (
-                                <span className="flex-shrink-0 text-brand-primary" title="Descargado localmente">
-                                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9" fill="currentColor"/><path d="M12 7v8M12 15l-3-3M12 15l3-3" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none" className="text-bg-dark"/></svg>
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                          <span className="text-xs text-text-secondary">{formatTime(track.duration)}</span>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="text-sm text-text-secondary text-center py-12">La cola está vacía.</p>
-                    )}
+                  {/* Track Info in Focus */}
+                  <div className="text-center px-4 max-w-md">
+                    <h2 className="text-base md:text-lg font-extrabold text-white tracking-tight truncate">{currentTrack.title}</h2>
+                    <p className="text-xs md:text-sm text-brand-primary font-medium truncate">{currentTrack.artist}</p>
                   </div>
-                )}
 
-                {/* LYRICS TAB */}
-                {playerTab === "lyrics" && (
-                  <div className="flex flex-col h-full relative">
-                    <div className="px-4 pt-3 pb-1 flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs uppercase font-bold tracking-wider text-brand-primary">Letras de Canción</span>
-                        {showTranslation && (
-                          <span className="text-[9px] bg-brand-primary/20 text-brand-primary px-1.5 py-0.5 rounded-full font-bold uppercase">
-                            {TRANSLATION_LANGS.find(l => l.code === translationLang)?.name}
-                          </span>
+                  {/* Focus Header Action Toolbar */}
+                  <div className="flex items-center gap-1.5">
+                    {/* Glasses Button (Active state) */}
+                    <button
+                      onClick={() => setIsFocusMode(false)}
+                      className="p-2 rounded-xl bg-brand-primary text-bg-dark font-bold shadow-lg shadow-brand-primary/25 hover:scale-105 transition flex items-center gap-1.5 text-xs"
+                      title="Desactivar Modo Focus"
+                    >
+                      <GlassesIcon className="w-4 h-4" />
+                      <span className="hidden md:inline font-mono text-[10px]">FOCUS</span>
+                    </button>
+
+                    {/* Sync vs Plain Text Switch */}
+                    {(parsedLyrics.length > 0 || lyricsText) && (
+                      <div className="flex items-center bg-white/10 p-0.5 rounded-xl border border-white/15">
+                        <button
+                          onClick={() => setLyricsDisplayMode("synced")}
+                          className={`px-3 py-1 text-[11px] rounded-lg font-bold transition flex items-center gap-1.5 ${
+                            lyricsDisplayMode === "synced" ? "bg-brand-primary text-bg-dark shadow-md" : "text-text-secondary hover:text-white"
+                          }`}
+                          title="Modo sincronizado con música"
+                        >
+                          <Mic2 className="w-3.5 h-3.5" /> <span className="hidden sm:inline">Sincronizada</span>
+                        </button>
+                        <button
+                          onClick={() => setLyricsDisplayMode("plain")}
+                          className={`px-3 py-1 text-[11px] rounded-lg font-bold transition flex items-center gap-1.5 ${
+                            lyricsDisplayMode === "plain" ? "bg-brand-primary text-bg-dark shadow-md" : "text-text-secondary hover:text-white"
+                          }`}
+                          title="Modo lectura natural de texto"
+                        >
+                          <FileText className="w-3.5 h-3.5" /> <span className="hidden sm:inline">Texto plano</span>
+                        </button>
+                      </div>
+                    )}
+
+                    {/* Translation Button */}
+                    <div className="relative">
+                      <button
+                        onClick={() => {
+                          if (translatedLyrics) {
+                            setShowTranslation(!showTranslation);
+                          } else {
+                            setShowLangSelector(!showLangSelector);
+                          }
+                        }}
+                        className={`p-2 rounded-xl transition text-xs font-bold ${
+                          showTranslation ? "bg-brand-primary/20 text-brand-primary border border-brand-primary/30" : "bg-white/5 hover:bg-white/10 text-text-secondary hover:text-white"
+                        }`}
+                        title={showTranslation ? "Ocultar traducción" : "Traducir letras"}
+                      >
+                        <Languages className="w-4 h-4" />
+                      </button>
+
+                      {showLangSelector && (
+                        <div className="absolute right-0 top-full mt-2 bg-surface-dark border border-white/10 rounded-2xl shadow-2xl z-50 w-48 py-2 modal-content">
+                          <p className="px-3 py-1 text-[10px] uppercase tracking-wider text-text-secondary font-bold border-b border-white/5 mb-1">
+                            Traducir letra a:
+                          </p>
+                          <div className="max-h-60 overflow-y-auto px-1 space-y-0.5">
+                            {TRANSLATION_LANGS.map(lang => (
+                              <button
+                                key={lang.code}
+                                onClick={() => {
+                                  setShowLangSelector(false);
+                                  translateLyrics(lang.code);
+                                }}
+                                className="w-full text-left px-3 py-1.5 text-xs rounded-xl hover:bg-brand-primary hover:text-bg-dark text-text-primary transition flex items-center justify-between"
+                              >
+                                <span>{lang.name}</span>
+                                {translationLang === lang.code && <span className="w-1.5 h-1.5 rounded-full bg-brand-primary" />}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Scroll Lock Toggle */}
+                    {lyricsDisplayMode === "synced" && isLyricsSynced && (
+                      <button
+                        onClick={() => {
+                          const nextVal = !lyricsScrollLocked;
+                          setLyricsScrollLocked(nextVal);
+                          if (nextVal) {
+                            setTimeout(() => syncLyricsScroll(true), 50);
+                          }
+                        }}
+                        className={`p-2 rounded-xl transition text-xs font-bold ${
+                          lyricsScrollLocked ? "bg-brand-primary/15 text-brand-primary" : "bg-white/5 text-text-secondary hover:text-white"
+                        }`}
+                        title={lyricsScrollLocked ? "Desbloquear scroll libre" : "Bloquear scroll automático"}
+                      >
+                        {lyricsScrollLocked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+                      </button>
+                    )}
+
+                    {/* Lyrics Provider Menu Button */}
+                    <div className="relative">
+                      <button 
+                        onClick={() => setLyricsMenuOpen(!lyricsMenuOpen)} 
+                        className="p-2 rounded-xl bg-white/5 hover:bg-white/10 text-text-secondary hover:text-white transition flex items-center gap-1.5 text-xs"
+                        title="Proveedor de letras"
+                      >
+                        <span className="text-[10px] font-mono text-brand-primary hidden sm:inline">{lyricsProvider || "Auto"}</span>
+                        <MoreVertical className="w-4 h-4" />
+                      </button>
+
+                      {lyricsMenuOpen && (
+                        <div ref={lyricsMenuRef} className="absolute right-0 top-full mt-2 bg-surface-dark border border-white/10 rounded-2xl shadow-2xl z-50 w-60 py-2 modal-content">
+                          <div className="px-3 py-1.5 text-[10px] uppercase tracking-wider text-text-secondary font-bold flex items-center justify-between border-b border-white/5 mb-1">
+                            <span>Proveedor</span>
+                            <span className="text-brand-primary font-mono">{lyricsProvider || "Automático"}</span>
+                          </div>
+                          <div className="space-y-0.5 px-1">
+                            {[
+                              { key: null, label: "Automático (Recomendado)" },
+                              { key: "YouTube Music", label: "YouTube Music" },
+                              { key: "YouTube Subtitle", label: "YouTube Subtitle" },
+                              { key: "LrcLib", label: "LrcLib" },
+                              { key: "KuGou", label: "KuGou" },
+                              { key: "SimpMusic", label: "SimpMusic" },
+                              { key: "BetterLyrics", label: "BetterLyrics" },
+                            ].map(opt => (
+                              <button
+                                key={opt.key ?? "auto"}
+                                onClick={() => {
+                                  if (currentTrack) {
+                                    setLyricsProvider(opt.key);
+                                    fetchLyrics(currentTrack, opt.key ?? undefined);
+                                    setLyricsMenuOpen(false);
+                                  }
+                                }}
+                                className={`w-full text-left px-3 py-1.5 text-xs rounded-xl transition flex items-center justify-between ${
+                                  (opt.key === null && !lyricsProvider) || opt.key === lyricsProvider
+                                    ? "bg-brand-primary/15 text-brand-primary font-bold"
+                                    : "text-text-secondary hover:bg-white/5 hover:text-text-primary"
+                                }`}
+                              >
+                                <span>{opt.label}</span>
+                                {((opt.key === null && !lyricsProvider) || opt.key === lyricsProvider) && (
+                                  <span className="w-1.5 h-1.5 rounded-full bg-brand-primary flex-shrink-0" />
+                                )}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="border-t border-white/5 my-1.5" />
+                          <button 
+                            onClick={() => { setShowLangSelector(true); setLyricsMenuOpen(false); }}
+                            className="w-full text-left px-3 py-2 text-xs hover:bg-brand-primary hover:text-bg-dark rounded-xl transition flex items-center gap-2"
+                          >
+                            <Languages className="w-3.5 h-3.5" /> Traducir letras a otro idioma...
+                          </button>
+                          <button 
+                            onClick={copyLyrics} 
+                            className="w-full text-left px-3 py-2 text-xs hover:bg-brand-primary hover:text-bg-dark rounded-xl transition flex items-center gap-2"
+                          >
+                            <Copy className="w-3.5 h-3.5" /> Copiar letra completa
+                          </button>
+                          <button 
+                            onClick={() => { 
+                              if (currentTrack) fetchLyrics(currentTrack, lyricsProvider ?? undefined, true); 
+                              setLyricsMenuOpen(false); 
+                            }} 
+                            className="w-full text-left px-3 py-2 text-xs hover:bg-brand-primary hover:text-bg-dark rounded-xl transition flex items-center gap-2"
+                          >
+                            <RefreshCw className="w-3.5 h-3.5" /> Recargar letras (Limpiar caché)
+                          </button>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Minimize Player Button */}
+                    <button 
+                      onClick={() => setIsPlayerExpanded(false)}
+                      className="p-2 bg-white/5 hover:bg-white/10 text-white rounded-full transition"
+                      title="Minimizar reproductor"
+                    >
+                      <ChevronDown className="w-5 h-5" />
+                    </button>
+                  </div>
+                </div>
+
+                {/* Focus Lyrics Content (Edge to Edge, Clean Dynamic Backdrop) */}
+                <div 
+                  ref={lyricsContainerRef} 
+                  className={`flex-1 w-full max-w-4xl mx-auto overflow-y-auto px-6 py-16 space-y-8 text-center select-none lyrics-mask-fade lyrics-font ${
+                    lyricsScrollLocked && lyricsDisplayMode === "synced" && isLyricsSynced ? "overflow-hidden" : "overflow-y-auto"
+                  }`}
+                >
+                  {translating && (
+                    <div className="flex items-center justify-center gap-2 py-4 text-brand-primary animate-pulse">
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      <span className="text-sm font-semibold">Traduciendo letras...</span>
+                    </div>
+                  )}
+
+                  {lyricsLoadingProvider && (
+                    <div className="flex items-center justify-center gap-2 py-4 text-brand-primary animate-pulse">
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      <span className="text-sm font-semibold">Cargando desde {lyricsLoadingProvider}...</span>
+                    </div>
+                  )}
+
+                  {(() => {
+                    const displayLyrics = showTranslation && translatedLyrics ? translatedLyrics : parsedLyrics;
+                    if (displayLyrics.length > 0) {
+                      if (lyricsDisplayMode === "plain" || !isLyricsSynced) {
+                        // Natural Text Mode
+                        return (
+                          <div className="max-w-2xl mx-auto space-y-6 text-left md:text-center py-6 animate-fade-in">
+                            {displayLyrics.map((line, idx) => (
+                              <p 
+                                key={idx} 
+                                className="text-xl md:text-2xl lg:text-3xl text-white/85 font-medium leading-relaxed tracking-wide"
+                              >
+                                {line.text}
+                              </p>
+                            ))}
+                          </div>
+                        );
+                      }
+
+                      // Synchronized Mode (Apple Music / Spotify Style Focus)
+                      return displayLyrics.map((line, idx) => {
+                        const isActive = idx === currentLyricIndex;
+                        return (
+                          <p
+                            key={idx}
+                            id={`lyric-line-${idx}`}
+                            onClick={() => {
+                              if (line.time >= 0 && audioRef.current) {
+                                audioRef.current.currentTime = line.time;
+                                setCurrentTime(line.time);
+                              }
+                            }}
+                            className={`text-2xl md:text-4xl lg:text-5xl leading-tight tracking-tight cursor-pointer ${
+                              isActive ? "lyric-line-active" : "lyric-line-inactive"
+                            }`}
+                          >
+                            {line.text || "•••"}
+                          </p>
+                        );
+                      });
+                    } else {
+                      return (
+                        <div className="py-24 text-center space-y-3">
+                          <p className="text-lg md:text-xl text-white/70 font-medium">{lyricsText}</p>
+                          {currentTrack && (
+                            <button
+                              onClick={() => fetchLyrics(currentTrack, undefined, true)}
+                              className="px-4 py-2 bg-brand-primary text-bg-dark rounded-xl font-bold text-xs hover:scale-105 transition"
+                            >
+                              Buscar en otros proveedores
+                            </button>
+                          )}
+                        </div>
+                      );
+                    }
+                  })()}
+                </div>
+
+                {/* Focus Mode Edge-to-Edge Centered Controls Bar */}
+                <div className="w-full max-w-2xl mx-auto flex flex-col gap-3 px-4 pt-2 pb-3 focus-controls-bar">
+                  {/* Time Slider */}
+                  <div className="w-full flex items-center gap-3">
+                    <span id="player-time-exp" className="text-xs font-mono text-text-secondary w-10 text-right cursor-pointer hover:text-brand-primary transition" onClick={toggleTimeDisplay}>
+                      {showRemaining ? `-${formatTime(Math.max(0, duration - currentTime))}` : formatTime(currentTime)}
+                    </span>
+                    <input 
+                      id="player-slider-exp" 
+                      type="range" 
+                      min="0" 
+                      max={duration || 100} 
+                      onChange={handleSeek}
+                      className="flex-1 accent-brand-primary h-1.5 bg-white/10 rounded-full cursor-pointer hover:h-2 transition-all" 
+                    />
+                    <span className="text-xs font-mono text-text-secondary w-10 text-left">{formatTime(duration)}</span>
+                  </div>
+
+                  {/* Centered Controls Row */}
+                  <div className="flex items-center justify-between w-full pt-1">
+                    <div className="flex items-center gap-3">
+                      <button
+                        onClick={() => setRepeatMode(prev => prev === "none" ? "all" : prev === "all" ? "one" : "none")}
+                        className={`p-2 rounded-xl transition ${repeatMode !== "none" ? "text-brand-primary bg-brand-primary/10" : "text-text-secondary hover:text-white"}`}
+                        title={repeatMode === "none" ? "Repetición: Desactivada" : repeatMode === "one" ? "Repetición: Una canción" : "Repetición: Todo"}
+                      >
+                        {repeatMode === "one" ? <Repeat1 className="w-5 h-5" /> : <Repeat className="w-5 h-5" />}
+                      </button>
+                      <button 
+                        onClick={() => setIsShuffle(!isShuffle)} 
+                        className={`p-2 rounded-xl transition ${isShuffle ? "text-brand-primary bg-brand-primary/10" : "text-text-secondary hover:text-white"}`}
+                        title="Aleatorio"
+                      >
+                        <Shuffle className="w-5 h-5" />
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-5">
+                      <button onClick={playPrev} className="p-2 text-text-secondary hover:text-white transition hover:scale-110 active:scale-95" title="Anterior">
+                        <SkipBack className="w-6 h-6" />
+                      </button>
+                      <button 
+                        onClick={togglePlay} 
+                        className="w-14 h-14 bg-brand-primary text-bg-dark rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition shadow-2xl shadow-brand-primary/30"
+                        title={isPlaying ? "Pausar" : "Reproducir"}
+                      >
+                        {isPlaying ? <Pause className="w-6 h-6 fill-current" /> : <Play className="w-6 h-6 fill-current translate-x-0.5" />}
+                      </button>
+                      <button onClick={playNext} className="p-2 text-text-secondary hover:text-white transition hover:scale-110 active:scale-95" title="Siguiente">
+                        <SkipForward className="w-6 h-6" />
+                      </button>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                      <button 
+                        onClick={() => toggleFavorite(currentTrack)} 
+                        className="p-2 text-text-secondary hover:text-brand-primary transition"
+                        title="Favorito"
+                      >
+                        <Heart className={`w-5 h-5 ${isFavorite(currentTrack) ? "fill-brand-primary text-brand-primary" : ""}`} />
+                      </button>
+                      <button
+                        onClick={() => setShowCastModal(true)}
+                        className={`p-2 rounded-xl transition ${castSession.state === "connected" ? "text-brand-primary bg-brand-primary/10 cast-active-pulse" : "text-text-secondary hover:text-white"}`}
+                        title="Transmitir audio (Cast)"
+                      >
+                        <CastIcon className="w-5 h-5" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              /* ═══════════════════════════════════════════════════════════════
+                 STANDARD EXPANDED PLAYER VIEW (2 Columns)
+                 ═══════════════════════════════════════════════════════════════ */
+              <div className="relative z-10 flex flex-col md:flex-row h-full w-full items-center justify-center gap-8 overflow-y-auto md:overflow-y-hidden">
+                <button 
+                  onClick={() => setIsPlayerExpanded(false)}
+                  className="fixed top-6 right-6 p-3 bg-white/5 hover:bg-white/10 text-white rounded-full transition z-[60]"
+                  title="Minimizar reproductor"
+                >
+                  <ChevronDown className="w-6 h-6" />
+                </button>
+
+                {/* Left Panel: Cover Art & Controls */}
+                <div className="w-full md:w-1/2 flex flex-col items-center justify-center max-w-md gap-6 flex-shrink-0">
+                  {/* Cover Art */}
+                  <div 
+                    onTouchStart={handleTouchStart}
+                    onTouchMove={handleTouchMove}
+                    onTouchEnd={handleTouchEnd}
+                    className="relative aspect-square w-full max-w-[350px] rounded-3xl overflow-hidden shadow-2xl bg-black/40 border border-white/10 cursor-grab active:cursor-grabbing group"
+                  >
+                    <SafeImage trackId={currentTrack.id} src={currentTrack.thumbnail} alt={currentTrack.title} className="w-full h-full object-cover" />
+                  </div>
+                  
+                  {/* Title & Artist */}
+                  <div className="text-center w-full px-4 flex flex-col gap-1">
+                    <h2 className="text-2xl font-bold tracking-tight text-white line-clamp-1">{currentTrack.title}</h2>
+                    <p className="text-brand-primary font-semibold text-sm truncate">{currentTrack.artist}</p>
+                  </div>
+
+                  {/* Controls */}
+                  <div className="flex items-center justify-center gap-4 w-full">
+                    <button
+                      onClick={() => setRepeatMode(prev => prev === "none" ? "all" : prev === "all" ? "one" : "none")}
+                      className={`p-2 transition ${repeatMode !== "none" ? "text-brand-primary" : "text-text-secondary hover:text-white"}`}
+                      title={repeatMode === "none" ? "Repetición: Desactivada" : repeatMode === "one" ? "Repetición: Una canción" : "Repetición: Todo"}
+                    >
+                      {repeatMode === "one" ? <Repeat1 className="w-5 h-5" /> : <Repeat className="w-5 h-5" />}
+                    </button>
+                    <button onClick={() => setIsShuffle(!isShuffle)} className={`p-2 transition ${isShuffle ? "text-brand-primary" : "text-text-secondary hover:text-white"}`}>
+                      <Shuffle className="w-5 h-5" />
+                    </button>
+                    <button onClick={playPrev} className="p-2 text-text-secondary hover:text-white transition">
+                      <SkipBack className="w-6 h-6" />
+                    </button>
+                    <button onClick={togglePlay} className="w-14 h-14 bg-brand-primary text-bg-dark rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition shadow-lg shadow-brand-primary/20">
+                      {isPlaying ? <Pause className="w-6 h-6 fill-current" /> : <Play className="w-6 h-6 fill-current" />}
+                    </button>
+                    <button onClick={playNext} className="p-2 text-text-secondary hover:text-white transition">
+                      <SkipForward className="w-6 h-6" />
+                    </button>
+                    <button onClick={() => toggleFavorite(currentTrack)} className="p-2 text-text-secondary hover:text-brand-primary transition">
+                      <Heart className={`w-5 h-5 ${isFavorite(currentTrack) ? "fill-brand-primary text-brand-primary" : ""}`} />
+                    </button>
+                    <button 
+                      onClick={() => setShowCastModal(true)} 
+                      className={`p-2 transition ${castSession.state === "connected" ? "text-brand-primary cast-active-pulse" : "text-text-secondary hover:text-white"}`}
+                      title="Transmitir audio (Cast)"
+                    >
+                      <CastIcon className="w-5 h-5" />
+                    </button>
+                    <button 
+                      onClick={(e) => { 
+                        e.stopPropagation(); 
+                        setContextMenuTrack(currentTrack); 
+                      }} 
+                      className="p-2 text-text-secondary hover:text-white transition"
+                      title="Más opciones"
+                    >
+                      <MoreVertical className="w-5 h-5" />
+                    </button>
+                  </div>
+
+                  {/* Time Slider */}
+                  <div className="w-full flex items-center gap-3 px-4">
+                    <span id="player-time-exp" className="text-xs text-text-secondary w-10 text-right cursor-pointer hover:text-brand-primary transition" onClick={toggleTimeDisplay}>{showRemaining ? `-${formatTime(Math.max(0, duration - currentTime))}` : formatTime(currentTime)}</span>
+                    <input id="player-slider-exp" type="range" min="0" max={duration || 100} onChange={handleSeek}
+                      className="flex-1 accent-brand-primary h-1 bg-white/10 rounded-full cursor-pointer" />
+                    <span className="text-xs text-text-secondary w-10 text-left">{formatTime(duration)}</span>
+                  </div>
+                </div>
+
+                {/* Right Panel: Tabs (Queue / Lyrics / Related) */}
+                <div className="w-full md:w-1/2 h-[380px] md:h-[520px] flex flex-col max-w-lg border border-white/5 rounded-3xl bg-surface-dark/30 backdrop-blur-md overflow-hidden flex-shrink-0">
+                  {/* Tab bar */}
+                  <div className="flex border-b border-white/5">
+                    {[
+                      { key: "queue" as const, label: "Siguiente", icon: <ListMusic className="w-3.5 h-3.5" /> },
+                      { key: "lyrics" as const, label: "Letra", icon: <Mic2 className="w-3.5 h-3.5" /> },
+                      { key: "related" as const, label: "Relacionado", icon: <Radio className="w-3.5 h-3.5" /> },
+                    ].map(tab => (
+                      <button
+                        key={tab.key}
+                        onClick={() => setPlayerTab(tab.key)}
+                        className={`flex-1 py-3 text-xs font-bold uppercase tracking-wider flex items-center justify-center gap-1.5 transition ${
+                          playerTab === tab.key ? "text-brand-primary border-b-2 border-brand-primary" : "text-text-secondary hover:text-text-primary"
+                        }`}
+                      >
+                        {tab.icon} {tab.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Tab content */}
+                  <div className="flex-1 overflow-y-auto">
+                    {playerTab === "queue" && (
+                      <div className="p-4 space-y-1">
+                        {activeQueue.length > 0 ? (
+                          activeQueue.map((track, idx) => (
+                            <div
+                              key={track.id}
+                              draggable
+                              onDragStart={(e) => handleDragStart(e, idx)}
+                              onDragOver={(e) => handleDragOver(e, idx)}
+                              onDrop={(e) => handleDrop(e, idx)}
+                              onDragEnd={() => { setDragIndex(null); setDragOverIndex(null); }}
+                              className={`flex items-center gap-3 p-2.5 rounded-xl transition cursor-pointer group ${
+                                currentTrack?.id === track.id ? "bg-brand-primary/10 border border-brand-primary/20" : "hover:bg-white/5"
+                              } ${dragIndex === idx ? "dragging-queue-item" : ""} ${dragOverIndex === idx ? "drag-over-queue-item" : ""}`}
+                              onClick={() => playTrack(track)}
+                            >
+                              <GripVertical className="w-4 h-4 text-text-secondary/50 drag-handle flex-shrink-0" />
+                              <SafeImage trackId={track.id} src={track.thumbnail} className="w-9 h-9 rounded-lg object-cover flex-shrink-0" alt={track.title} />
+                              <div className="min-w-0 flex-1">
+                                <p className={`text-sm truncate ${currentTrack?.id === track.id ? "text-brand-primary font-semibold" : "font-medium"}`}>{track.title}</p>
+                                <div className="flex items-center gap-1.5 min-w-0">
+                                  <p className="text-xs text-text-secondary truncate">{track.artist}</p>
+                                  {downloads[track.id] && (
+                                    <span className="flex-shrink-0 text-brand-primary" title="Descargado localmente">
+                                      <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9" fill="currentColor"/><path d="M12 7v8M12 15l-3-3M12 15l3-3" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" fill="none" className="text-bg-dark"/></svg>
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                              <span className="text-xs text-text-secondary">{formatTime(track.duration)}</span>
+                            </div>
+                          ))
+                        ) : (
+                          <p className="text-sm text-text-secondary text-center py-12">La cola está vacía.</p>
                         )}
                       </div>
-                      <div className="relative flex items-center gap-1">
-                        {/* Translation toggle */}
-                        {translatedLyrics && (
-                          <button
-                            onClick={() => setShowTranslation(!showTranslation)}
-                            className={`p-1.5 transition text-xs font-bold rounded-lg ${showTranslation ? "text-brand-primary bg-brand-primary/10" : "text-text-secondary hover:text-brand-primary"}`}
-                            title={showTranslation ? "Ver original" : "Ver traducción"}
-                          >
-                            <Languages className="w-4 h-4" />
-                          </button>
-                        )}
-                        {/* Scroll lock toggle */}
-                        <button
-                          onClick={() => {
-                            const nextVal = !lyricsScrollLocked;
-                            setLyricsScrollLocked(nextVal);
-                            if (nextVal) {
-                              setTimeout(() => {
-                                syncLyricsScroll(true);
-                              }, 50);
-                            }
-                          }}
-                          className={`p-1.5 transition text-xs font-bold rounded-lg ${lyricsScrollLocked ? "text-brand-primary bg-brand-primary/10" : "text-text-secondary hover:text-brand-primary"}`}
-                          title={lyricsScrollLocked ? "Desbloquear scroll" : "Bloquear scroll en letra activa"}
-                        >
-                          {lyricsScrollLocked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
-                        </button>
-                        {translating && (
-                          <Loader2 className="w-4 h-4 text-brand-primary animate-spin" />
-                        )}
-                        <button onClick={() => setLyricsMenuOpen(!lyricsMenuOpen)} className="p-1.5 text-text-secondary hover:text-brand-primary transition">
-                          <MoreVertical className="w-4 h-4" />
-                        </button>
-                        {lyricsMenuOpen && (
-                          <div ref={lyricsMenuRef} className="absolute right-0 top-full mt-1 bg-surface-dark border border-white/10 rounded-xl shadow-2xl z-10 w-56 py-1 modal-content">
-                            <div className="px-3 py-2 text-[10px] uppercase tracking-wider text-text-secondary/60 font-bold flex items-center gap-2 border-b border-white/5 mb-1">
-                              <span className="flex-1">Proveedor</span>
-                              <span className="text-brand-primary text-[10px] font-mono">{lyricsProvider || "auto"}</span>
-                            </div>
-                            <div className="space-y-0.5 px-1">
-                              {[
-                                { key: null, label: "Automático (más rápido)" },
-                                { key: "YouTube Music", label: "YouTube Music" },
-                                { key: "YouTube Subtitle", label: "YouTube Subtitle" },
-                                { key: "LrcLib", label: "LrcLib" },
-                                { key: "KuGou", label: "KuGou" },
-                                { key: "SimpMusic", label: "SimpMusic" },
-                                { key: "BetterLyrics", label: "BetterLyrics" },
-                              ].map(opt => (
+                    )}
+
+                    {/* LYRICS TAB */}
+                    {playerTab === "lyrics" && (
+                      <div className="flex flex-col h-full relative">
+                        <div className="px-4 pt-3 pb-2 flex items-center justify-between border-b border-white/5">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs uppercase font-bold tracking-wider text-brand-primary">Letras</span>
+                            {showTranslation && (
+                              <span className="text-[9px] bg-brand-primary/20 text-brand-primary px-1.5 py-0.5 rounded-full font-bold uppercase">
+                                {TRANSLATION_LANGS.find(l => l.code === translationLang)?.name}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="relative flex items-center gap-1.5">
+                            {/* Focus Mode Button */}
+                            <button
+                              onClick={() => setIsFocusMode(true)}
+                              className="p-1.5 bg-white/5 hover:bg-brand-primary hover:text-bg-dark text-text-secondary rounded-lg transition flex items-center gap-1 text-xs font-bold"
+                              title="Modo Focus"
+                            >
+                              <GlassesIcon className="w-4 h-4" />
+                              <span className="hidden sm:inline text-[10px]">Focus</span>
+                            </button>
+
+                            {/* Sync vs Plain Text Switch */}
+                            {(parsedLyrics.length > 0 || lyricsText) && (
+                              <div className="flex items-center bg-white/10 p-0.5 rounded-lg border border-white/15">
                                 <button
-                                  key={opt.key ?? "auto"}
-                                  onClick={() => {
-                                    if (currentTrack) {
-                                      if (opt.key !== null) setLyricsProvider(opt.key);
-                                      fetchLyrics(currentTrack, opt.key ?? undefined);
-                                    }
-                                  }}
-                                  className={`w-full text-left px-3 py-1.5 text-xs rounded-lg transition flex items-center justify-between ${
-                                    (opt.key === null && !lyricsProvider) || opt.key === lyricsProvider
-                                      ? "bg-brand-primary/10 text-brand-primary font-bold" : "text-text-secondary hover:bg-white/5 hover:text-text-primary"
+                                  onClick={() => setLyricsDisplayMode("synced")}
+                                  className={`px-2 py-1 text-[10px] rounded-md font-bold transition flex items-center gap-1 ${
+                                    lyricsDisplayMode === "synced" ? "bg-brand-primary text-bg-dark shadow" : "text-text-secondary hover:text-white"
                                   }`}
+                                  title="Modo sincronizado"
                                 >
-                                  <span>{opt.label}</span>
-                                  {((opt.key === null && !lyricsProvider) || opt.key === lyricsProvider) && (
-                                    <span className="w-1.5 h-1.5 rounded-full bg-brand-primary flex-shrink-0" />
-                                  )}
+                                  <Mic2 className="w-3 h-3" /> Sinc.
                                 </button>
-                              ))}
-                            </div>
-                            <div className="border-t border-white/5 my-1" />
-                            <button onClick={copyLyrics} className="w-full text-left px-3 py-2 text-xs hover:bg-brand-primary hover:text-bg-dark rounded-lg transition flex items-center gap-2">
-                              <Copy className="w-3.5 h-3.5" /> Copiar toda la letra
-                            </button>
-                            <button onClick={() => { if (currentTrack) fetchLyrics(currentTrack, lyricsProvider ?? undefined); setLyricsMenuOpen(false); }} className="w-full text-left px-3 py-2 text-xs hover:bg-brand-primary hover:text-bg-dark rounded-lg transition flex items-center gap-2">
-                              <RefreshCw className="w-3.5 h-3.5" /> Recargar letras
-                            </button>
-                            {translatedLyrics && (
-                              <>
-                                <div className="border-t border-white/5 my-1" />
                                 <button
-                                  onClick={() => { setShowLangSelector(!showLangSelector); }}
-                                  className="w-full text-left px-3 py-2 text-xs hover:bg-brand-primary hover:text-bg-dark rounded-lg transition flex items-center gap-2"
+                                  onClick={() => setLyricsDisplayMode("plain")}
+                                  className={`px-2 py-1 text-[10px] rounded-md font-bold transition flex items-center gap-1 ${
+                                    lyricsDisplayMode === "plain" ? "bg-brand-primary text-bg-dark shadow" : "text-text-secondary hover:text-white"
+                                  }`}
+                                  title="Modo texto plano"
                                 >
-                                  <Languages className="w-3.5 h-3.5" /> Traducir letras
+                                  <FileText className="w-3 h-3" /> Texto
                                 </button>
-                                {showLangSelector && (
-                                  <div className="px-2 py-1 space-y-0.5">
+                              </div>
+                            )}
+
+                            {/* Translation Button */}
+                            <div className="relative">
+                              <button
+                                onClick={() => {
+                                  if (translatedLyrics) {
+                                    setShowTranslation(!showTranslation);
+                                  } else {
+                                    setShowLangSelector(!showLangSelector);
+                                  }
+                                }}
+                                className={`p-1.5 transition text-xs font-bold rounded-lg ${
+                                  showTranslation ? "text-brand-primary bg-brand-primary/10" : "text-text-secondary hover:text-brand-primary"
+                                }`}
+                                title={showTranslation ? "Ver original" : "Traducir letras"}
+                              >
+                                <Languages className="w-4 h-4" />
+                              </button>
+
+                              {showLangSelector && (
+                                <div className="absolute right-0 top-full mt-1 bg-surface-dark border border-white/10 rounded-xl shadow-2xl z-50 w-44 py-1 modal-content">
+                                  <p className="px-3 py-1 text-[9px] uppercase tracking-wider text-text-secondary font-bold border-b border-white/5 mb-1">
+                                    Idioma
+                                  </p>
+                                  <div className="max-h-48 overflow-y-auto px-1 space-y-0.5">
                                     {TRANSLATION_LANGS.map(lang => (
                                       <button
                                         key={lang.code}
                                         onClick={() => {
-                                          setTranslationLang(lang.code);
-                                          localStorage.setItem("capi_translation_lang", lang.code);
                                           setShowLangSelector(false);
                                           translateLyrics(lang.code);
                                         }}
-                                        className={`w-full text-left px-3 py-1.5 text-xs rounded-lg transition flex items-center justify-between ${
-                                          translationLang === lang.code ? "bg-brand-primary/10 text-brand-primary font-bold" : "text-text-secondary hover:bg-white/5 hover:text-text-primary"
-                                        }`}
+                                        className="w-full text-left px-2.5 py-1 text-xs rounded-lg hover:bg-brand-primary hover:text-bg-dark text-text-primary transition flex items-center justify-between"
                                       >
                                         <span>{lang.name}</span>
                                         {translationLang === lang.code && <span className="w-1.5 h-1.5 rounded-full bg-brand-primary" />}
                                       </button>
                                     ))}
                                   </div>
-                                )}
-                              </>
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Scroll lock toggle */}
+                            {lyricsDisplayMode === "synced" && isLyricsSynced && (
+                              <button
+                                onClick={() => {
+                                  const nextVal = !lyricsScrollLocked;
+                                  setLyricsScrollLocked(nextVal);
+                                  if (nextVal) {
+                                    setTimeout(() => syncLyricsScroll(true), 50);
+                                  }
+                                }}
+                                className={`p-1.5 transition text-xs font-bold rounded-lg ${
+                                  lyricsScrollLocked ? "text-brand-primary bg-brand-primary/10" : "text-text-secondary hover:text-brand-primary"
+                                }`}
+                                title={lyricsScrollLocked ? "Desbloquear scroll" : "Bloquear scroll en letra activa"}
+                              >
+                                {lyricsScrollLocked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+                              </button>
+                            )}
+
+                            {translating && (
+                              <Loader2 className="w-4 h-4 text-brand-primary animate-spin" />
+                            )}
+
+                            {/* Provider menu */}
+                            <button onClick={() => setLyricsMenuOpen(!lyricsMenuOpen)} className="p-1.5 text-text-secondary hover:text-brand-primary transition">
+                              <MoreVertical className="w-4 h-4" />
+                            </button>
+
+                            {lyricsMenuOpen && (
+                              <div ref={lyricsMenuRef} className="absolute right-0 top-full mt-1 bg-surface-dark border border-white/10 rounded-xl shadow-2xl z-50 w-56 py-1 modal-content">
+                                <div className="px-3 py-2 text-[10px] uppercase tracking-wider text-text-secondary/60 font-bold flex items-center gap-2 border-b border-white/5 mb-1">
+                                  <span className="flex-1">Proveedor</span>
+                                  <span className="text-brand-primary text-[10px] font-mono">{lyricsProvider || "auto"}</span>
+                                </div>
+                                <div className="space-y-0.5 px-1">
+                                  {[
+                                    { key: null, label: "Automático (más rápido)" },
+                                    { key: "YouTube Music", label: "YouTube Music" },
+                                    { key: "YouTube Subtitle", label: "YouTube Subtitle" },
+                                    { key: "LrcLib", label: "LrcLib" },
+                                    { key: "KuGou", label: "KuGou" },
+                                    { key: "SimpMusic", label: "SimpMusic" },
+                                    { key: "BetterLyrics", label: "BetterLyrics" },
+                                  ].map(opt => (
+                                    <button
+                                      key={opt.key ?? "auto"}
+                                      onClick={() => {
+                                        if (currentTrack) {
+                                          setLyricsProvider(opt.key);
+                                          fetchLyrics(currentTrack, opt.key ?? undefined);
+                                          setLyricsMenuOpen(false);
+                                        }
+                                      }}
+                                      className={`w-full text-left px-3 py-1.5 text-xs rounded-lg transition flex items-center justify-between ${
+                                        (opt.key === null && !lyricsProvider) || opt.key === lyricsProvider
+                                          ? "bg-brand-primary/10 text-brand-primary font-bold" : "text-text-secondary hover:bg-white/5 hover:text-text-primary"
+                                      }`}
+                                    >
+                                      <span>{opt.label}</span>
+                                      {((opt.key === null && !lyricsProvider) || opt.key === lyricsProvider) && (
+                                        <span className="w-1.5 h-1.5 rounded-full bg-brand-primary flex-shrink-0" />
+                                      )}
+                                    </button>
+                                  ))}
+                                </div>
+                                <div className="border-t border-white/5 my-1" />
+                                <button 
+                                  onClick={() => { setShowLangSelector(true); setLyricsMenuOpen(false); }}
+                                  className="w-full text-left px-3 py-2 text-xs hover:bg-brand-primary hover:text-bg-dark rounded-lg transition flex items-center gap-2"
+                                >
+                                  <Languages className="w-3.5 h-3.5" /> Traducir letras...
+                                </button>
+                                <button onClick={copyLyrics} className="w-full text-left px-3 py-2 text-xs hover:bg-brand-primary hover:text-bg-dark rounded-lg transition flex items-center gap-2">
+                                  <Copy className="w-3.5 h-3.5" /> Copiar toda la letra
+                                </button>
+                                <button onClick={() => { if (currentTrack) fetchLyrics(currentTrack, lyricsProvider ?? undefined, true); setLyricsMenuOpen(false); }} className="w-full text-left px-3 py-2 text-xs hover:bg-brand-primary hover:text-bg-dark rounded-lg transition flex items-center gap-2">
+                                  <RefreshCw className="w-3.5 h-3.5" /> Recargar letras
+                                </button>
+                              </div>
                             )}
                           </div>
-                        )}
+                        </div>
+
+                        {/* Lyrics Tab Lines Container */}
+                        <div 
+                          ref={lyricsContainerRef} 
+                          className={`flex-1 p-6 space-y-6 text-center text-text-secondary lyrics-mask-fade lyrics-font ${
+                            lyricsScrollLocked && lyricsDisplayMode === "synced" && isLyricsSynced ? "overflow-hidden" : "overflow-y-auto"
+                          }`}
+                        >
+                          {lyricsLoadingProvider && (
+                            <p className="text-xs text-brand-primary animate-pulse py-4">Buscando letras en {lyricsLoadingProvider}...</p>
+                          )}
+
+                          {(() => {
+                            const displayLyrics = showTranslation && translatedLyrics ? translatedLyrics : parsedLyrics;
+                            if (displayLyrics.length > 0) {
+                              if (lyricsDisplayMode === "plain" || !isLyricsSynced) {
+                                return (
+                                  <div className="space-y-4 text-center py-4 animate-fade-in">
+                                    {displayLyrics.map((line, idx) => (
+                                      <p key={idx} className="text-base font-semibold text-white/80 leading-relaxed">
+                                        {line.text}
+                                      </p>
+                                    ))}
+                                  </div>
+                                );
+                              }
+
+                              return displayLyrics.map((line, idx) => {
+                                const isActive = idx === currentLyricIndex;
+                                return (
+                                  <p
+                                    key={idx}
+                                    id={`lyric-line-${idx}`}
+                                    className={`text-lg transition-all duration-300 ${
+                                      isActive 
+                                        ? "lyric-line-active text-brand-primary" 
+                                        : "lyric-line-inactive cursor-pointer"
+                                    }`}
+                                    onClick={() => {
+                                      if (line.time >= 0 && audioRef.current) {
+                                        audioRef.current.currentTime = line.time;
+                                        setCurrentTime(line.time);
+                                      }
+                                    }}
+                                  >
+                                    {line.text || "•••"}
+                                  </p>
+                                );
+                              });
+                            } else {
+                              return (
+                                <p className="text-sm py-12">{lyricsText}</p>
+                              );
+                            }
+                          })()}
+                        </div>
                       </div>
-                    </div>
-                    <div 
-                      ref={lyricsContainerRef} 
-                      className={`flex-1 ${lyricsScrollLocked ? "overflow-hidden" : "overflow-y-auto"} p-6 space-y-6 text-center text-text-secondary`}
-                    >
-                      {(() => {
-                        const displayLyrics = showTranslation && translatedLyrics ? translatedLyrics : parsedLyrics;
-                        return displayLyrics.length > 0 ? (
-                          displayLyrics.map((line, idx) => (
-                            <p
-                              key={idx}
-                              id={`lyric-line-${idx}`}
-                              className={`text-lg font-bold transition duration-300 ${
-                                idx === currentLyricIndex 
-                                  ? "text-brand-primary scale-105 font-extrabold" 
-                                  : "opacity-40 hover:opacity-80 cursor-pointer"
+                    )}
+
+                    {/* RELATED TAB */}
+                    {playerTab === "related" && (
+                      <div className="p-4 space-y-1">
+                        {relatedTracks.length > 0 ? (
+                          relatedTracks.map((track, idx) => (
+                            <div
+                              key={track.id + idx}
+                              className={`flex items-center gap-3 p-2.5 rounded-xl transition cursor-pointer hover:bg-white/5 group ${
+                                currentTrack?.id === track.id ? "bg-brand-primary/10" : ""
                               }`}
-                              onClick={() => {
-                                if (line.time >= 0 && audioRef.current) {
-                                  audioRef.current.currentTime = line.time;
-                                  setCurrentTime(line.time);
-                                }
-                              }}
+                              onClick={() => playTrack(track, relatedTracks)}
                             >
-                              {line.text || "•••"}
-                            </p>
+                              <SafeImage trackId={track.id} src={track.thumbnail} className="w-9 h-9 rounded-lg object-cover flex-shrink-0" alt={track.title} />
+                              <div className="min-w-0 flex-1">
+                                <p className="text-sm font-medium truncate">{track.title}</p>
+                                <p className="text-xs text-text-secondary truncate">{track.artist}</p>
+                              </div>
+                              <button 
+                                onClick={(e) => { e.stopPropagation(); openContextMenu(e, track.id); }}
+                                className="p-1.5 text-text-secondary hover:text-brand-primary opacity-0 group-hover:opacity-100 transition"
+                              >
+                                <MoreVertical className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
                           ))
                         ) : (
-                          <p className="text-sm py-12">{lyricsText}</p>
-                        );
-                      })()}
-          </div>
-        </div>
-      )}
-
-
-
-                {/* RELATED TAB */}
-                {playerTab === "related" && (
-                  <div className="p-4 space-y-1">
-                    {relatedTracks.length > 0 ? (
-                      relatedTracks.map((track, idx) => (
-                        <div
-                          key={track.id + idx}
-                          className={`flex items-center gap-3 p-2.5 rounded-xl transition cursor-pointer hover:bg-white/5 group ${
-                            currentTrack?.id === track.id ? "bg-brand-primary/10" : ""
-                          }`}
-                          onClick={() => playTrack(track, relatedTracks)}
-                        >
-                          <SafeImage trackId={track.id} src={track.thumbnail} className="w-9 h-9 rounded-lg object-cover flex-shrink-0" alt={track.title} />
-                          <div className="min-w-0 flex-1">
-                            <p className="text-sm font-medium truncate">{track.title}</p>
-                            <p className="text-xs text-text-secondary truncate">{track.artist}</p>
-                          </div>
-                          <button 
-                            onClick={(e) => { e.stopPropagation(); openContextMenu(e, track.id); }}
-                            className="p-1.5 text-text-secondary hover:text-brand-primary opacity-0 group-hover:opacity-100 transition"
-                          >
-                            <MoreVertical className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                      ))
-                    ) : (
-                      <p className="text-sm text-text-secondary text-center py-12">Cargando canciones relacionadas...</p>
+                          <p className="text-sm text-text-secondary text-center py-12">Cargando canciones relacionadas...</p>
+                        )}
+                      </div>
                     )}
                   </div>
-                )}
+                </div>
               </div>
+            )}
+          </div>
+        )}
+
+        {/* CAST CONTROL MODAL */}
+        {showCastModal && (
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-md flex items-center justify-center z-[70] modal-overlay" onClick={() => setShowCastModal(false)}>
+            <div className="glass p-6 rounded-3xl max-w-sm w-full border border-white/10 shadow-2xl mx-4 modal-content text-white" onClick={e => e.stopPropagation()}>
+              <div className="flex items-center justify-between pb-4 border-b border-white/10 mb-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2.5 rounded-2xl bg-brand-primary/20 text-brand-primary">
+                    <CastIcon className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="text-base font-bold">Transmitir audio</h3>
+                    <p className="text-xs text-text-secondary">Smart TVs y Chromecast</p>
+                  </div>
+                </div>
+                <button onClick={() => setShowCastModal(false)} className="p-1.5 rounded-full hover:bg-white/10 text-text-secondary hover:text-white transition">
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {castSession.state === "connected" && castSession.device ? (
+                <div className="space-y-4">
+                  <div className="p-4 rounded-2xl bg-brand-primary/10 border border-brand-primary/20 flex items-center justify-between">
+                    <div className="flex items-center gap-3">
+                      <div className="w-3 h-3 rounded-full bg-green-400 animate-pulse" />
+                      <div>
+                        <p className="text-sm font-bold text-white">{castSession.device.name}</p>
+                        <p className="text-xs text-brand-primary">
+                          {castSession.device.ip ? `IP: ${castSession.device.ip}` : "Transmitiendo stream"}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => { 
+                        castManager.disconnect(); 
+                        showToast("Transmisión finalizada"); 
+                      }}
+                      className="px-3 py-1.5 text-xs bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded-xl transition font-medium"
+                    >
+                      Desconectar
+                    </button>
+                  </div>
+
+                  <div className="space-y-2 pt-1">
+                    <div className="flex justify-between text-xs text-text-secondary">
+                      <span>Volumen de transmisión</span>
+                      <span className="font-mono text-brand-primary">{Math.round(castSession.volume * 100)}%</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1"
+                      step="0.05"
+                      value={castSession.volume}
+                      onChange={e => castManager.setVolume(parseFloat(e.target.value))}
+                      className="w-full accent-brand-primary h-1.5 bg-white/10 rounded-full cursor-pointer"
+                    />
+                  </div>
+                </div>
+              ) : (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <p className="text-xs font-semibold text-text-secondary uppercase tracking-wider">Dispositivos en red</p>
+                    <button
+                      onClick={async () => {
+                        await castManager.scanDevices();
+                        showToast("Búsqueda de red completada");
+                      }}
+                      disabled={castSession.isScanning}
+                      className="text-[11px] text-brand-primary hover:underline flex items-center gap-1 font-bold"
+                    >
+                      {castSession.isScanning ? (
+                        <>
+                          <Loader2 className="w-3 h-3 animate-spin" /> Buscando...
+                        </>
+                      ) : (
+                        <>
+                          <RefreshCw className="w-3 h-3" /> Escanear red
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  <div className="space-y-1.5 max-h-52 overflow-y-auto pr-1">
+                    {castManager.getAvailableDevices().length > 0 ? (
+                      castManager.getAvailableDevices().map(device => (
+                        <button
+                          key={device.id}
+                          onClick={async () => {
+                            await castManager.connect(device, audioRef.current, currentTrack ? { id: currentTrack.id, title: currentTrack.title, artist: currentTrack.artist, url: streamUrl || undefined, thumbnail: currentTrack.thumbnail } : undefined);
+                            showToast(`Transmitiendo a ${device.name}`);
+                          }}
+                          disabled={castSession.state === "connecting"}
+                          className="w-full flex items-center justify-between p-3 rounded-2xl hover:bg-white/5 border border-transparent hover:border-white/10 transition group text-left"
+                        >
+                          <div className="flex items-center gap-3">
+                            <div className="p-2 rounded-xl bg-white/5 group-hover:bg-brand-primary/20 group-hover:text-brand-primary transition text-text-secondary">
+                              <CastIcon className="w-4 h-4" />
+                            </div>
+                            <div>
+                              <p className="text-sm font-medium text-white group-hover:text-brand-primary transition">{device.name}</p>
+                              <p className="text-[11px] text-text-secondary font-mono">
+                                {device.ip ? `${device.ip} • ` : ""}{device.model || "Smart TV"}
+                              </p>
+                            </div>
+                          </div>
+                          {castSession.state === "connecting" && castSession.device?.id === device.id ? (
+                            <Loader2 className="w-4 h-4 text-brand-primary animate-spin" />
+                          ) : (
+                            <span className="text-xs text-brand-primary opacity-0 group-hover:opacity-100 transition font-medium">Conectar</span>
+                          )}
+                        </button>
+                      ))
+                    ) : (
+                      <div className="p-4 rounded-2xl bg-white/5 text-center text-xs text-text-secondary space-y-1">
+                        <p className="text-white/80 font-medium">No se detectaron dispositivos automáticamente.</p>
+                        <p className="text-[11px]">Asegúrate de que tu Smart TV o Chromecast esté en la misma red Wi-Fi.</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Manual IP Direct Connect */}
+                  <div className="pt-2 border-t border-white/10">
+                    <p className="text-[10px] uppercase font-bold text-text-secondary/70 tracking-wider mb-1.5">Conectar por IP directa</p>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="text"
+                        placeholder="192.168.1.50"
+                        value={manualCastIp}
+                        onChange={e => setManualCastIp(e.target.value)}
+                        className="flex-1 bg-white/5 border border-white/10 rounded-xl px-3 py-1.5 text-xs text-white placeholder-text-secondary focus:outline-none focus:border-brand-primary font-mono"
+                      />
+                      <button
+                        onClick={async () => {
+                          if (!manualCastIp.trim()) {
+                            showToast("Ingresa la dirección IP del Smart TV");
+                            return;
+                          }
+                          const dev = castManager.addManualDevice(manualCastIp.trim());
+                          await castManager.connect(dev, audioRef.current, currentTrack ? { id: currentTrack.id, title: currentTrack.title, artist: currentTrack.artist, url: streamUrl || undefined, thumbnail: currentTrack.thumbnail } : undefined);
+                          showToast(`Transmitiendo a ${dev.name}`);
+                        }}
+                        className="px-3 py-1.5 bg-brand-primary text-bg-dark rounded-xl font-bold text-xs hover:scale-105 transition"
+                      >
+                        Conectar
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         )}
@@ -7628,6 +8401,11 @@ function App() {
             </button>
           </div>
         </div>
+      )}
+
+      {/* DIAGNOSTIC MODAL (reemplaza el mensaje genérico para fallos de reproducción) */}
+      {diagnosticReport && (
+        <DiagnosticModal report={diagnosticReport} onClose={() => setDiagnosticReport(null)} />
       )}
 
       {/* GLOBAL CONFIRMATION MODAL */}

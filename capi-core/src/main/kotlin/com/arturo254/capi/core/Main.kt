@@ -279,6 +279,66 @@ fun mapYTItem(item: com.arturo254.opentune.innertube.models.YTItem): YTItemDTO {
 
 private var cachedSignatureTimestamp: Int? = null
 
+private val STREAM_CLIENTS: List<YouTubeClient> = listOf(
+    YouTubeClient.VISIONOS,
+    YouTubeClient.IPADOS,
+    YouTubeClient.IOS,
+    YouTubeClient.MOBILE,
+    YouTubeClient.IOS_MUSIC,
+    YouTubeClient.TVHTML5,
+    YouTubeClient.TVHTML5_SIMPLY_EMBEDDED_PLAYER,
+    YouTubeClient.WEB_REMIX,
+    YouTubeClient.WEB,
+    YouTubeClient.MWEB,
+    YouTubeClient.WEB_CREATOR,
+    YouTubeClient.WEB_EMBEDDED,
+    YouTubeClient.ANDROID_MUSIC,
+    YouTubeClient.ANDROID_VR_NO_AUTH,
+    YouTubeClient.ANDROID_VR_1_61_48,
+    YouTubeClient.ANDROID_VR_1_43_32,
+    YouTubeClient.ANDROID_UNPLUGGED,
+    YouTubeClient.ANDROID_CREATOR,
+    YouTubeClient.ANDROID_TESTSUITE,
+)
+
+private suspend fun resolveStreamUrl(videoId: String, sig: Int?): String? {
+    for (client in STREAM_CLIENTS) {
+        try {
+            val playerResp = YouTube.player(
+                videoId = videoId,
+                client = client,
+                signatureTimestamp = sig
+            ).getOrThrow()
+
+            if (playerResp.playabilityStatus.status != "OK") {
+                System.err.println("[DEBUG] Client ${client.clientName} playability: ${playerResp.playabilityStatus.status}, reason: ${playerResp.playabilityStatus.reason}")
+                continue
+            }
+
+            val audioFormats = playerResp.streamingData?.adaptiveFormats?.filter { it.isAudio } ?: emptyList()
+            if (audioFormats.isEmpty()) {
+                System.err.println("[DEBUG] Client ${client.clientName} playability OK but no audio formats")
+                continue
+            }
+
+            val format = audioFormats
+                .filterNot { it.mimeType.contains("codecs=\"opus\"") }
+                .maxByOrNull { it.bitrate }
+                ?: audioFormats.maxByOrNull { it.bitrate }!!
+
+            val url = NewPipeUtils.getStreamUrl(format, videoId, client).getOrNull()
+            if (url != null) {
+                System.err.println("[DEBUG] Stream resolved with client ${client.clientName} (${format.mimeType} @ ${format.bitrate})")
+                return url
+            }
+            System.err.println("[DEBUG] Client ${client.clientName}: getStreamUrl returned null")
+        } catch (e: Exception) {
+            System.err.println("[DEBUG] Client ${client.clientName} failed: ${e.message?.take(200)}")
+        }
+    }
+    return null
+}
+
 fun main(args: Array<String>) {
     // Prevent GraalVM from stripping serializers during static analysis by actively referencing them
     val activeSerializers = listOf(
@@ -487,69 +547,10 @@ fun main(args: Array<String>) {
                                         YouTube.poTokenGvs = reqPoToken
                                         YouTube.poTokenPlayer = reqPoToken
                                     }
-                                          val clients = listOf(
-                                              YouTubeClient.ANDROID_MUSIC,
-                                              YouTubeClient.ANDROID_VR_NO_AUTH
-                                          )
-                                        val sig = if (clients.any { it.useSignatureTimestamp }) {
-                                            cachedSignatureTimestamp ?: NewPipeUtils.getSignatureTimestamp(videoId).getOrNull()?.also {
-                                                cachedSignatureTimestamp = it
-                                            }
-                                        } else null
-                                        val streamUrl = kotlinx.coroutines.supervisorScope {
-                                         val deferreds = clients.map { client ->
-                                            async(Dispatchers.IO) {
-                                                try {
-                                                    val playerResp = YouTube.player(
-                                                        videoId = videoId,
-                                                        client = client,
-                                                        signatureTimestamp = sig
-                                                    ).getOrThrow()
-
-                                                    val audioFormats = playerResp.streamingData?.adaptiveFormats?.filter { it.isAudio && it.mimeType?.contains("codecs=\"opus\"") != true } ?: emptyList()
-                                                    if (audioFormats.isNotEmpty()) {
-                                                        val format = audioFormats.maxByOrNull { it.bitrate }!!
-                                                        val urlResult = NewPipeUtils.getStreamUrl(format, videoId, client)
-                                                        val url = urlResult.getOrNull()
-                                                        if (url != null) {
-                                                            return@async url
-                                                        } else {
-                                                            val err = urlResult.exceptionOrNull()
-                                                            System.err.println("[DEBUG] Client ${client.clientName}: NewPipeUtils.getStreamUrl failed: ${err?.message} | Cause: ${err?.cause?.message}")
-                                                        }
-                                                    } else {
-                                                        System.err.println("[DEBUG] Client ${client.clientName} playability: ${playerResp.playabilityStatus.status}, reason: ${playerResp.playabilityStatus.reason}")
-                                                    }
-                                                } catch (e: Exception) {
-                                                    val msg = e.message?.take(200) ?: "Unknown error"
-                                                    System.err.println("[DEBUG] Client ${client.clientName} failed: $msg")
-                                                }
-                                                null
-                                            }
-                                        }
-
-                                        val channel = kotlinx.coroutines.channels.Channel<String>(1)
-                                        var activeJobs = deferreds.size
-                                        deferreds.forEach { deferred ->
-                                            launch {
-                                                try {
-                                                    val res = deferred.await()
-                                                    if (res != null) {
-                                                        channel.trySend(res)
-                                                    }
-                                                } finally {
-                                                    activeJobs--
-                                                    if (activeJobs == 0) {
-                                                        channel.close()
-                                                    }
-                                                }
-                                            }
-                                        }
-
-                                        val firstResult = channel.receiveCatching().getOrNull()
-                                        deferreds.forEach { it.cancel() }
-                                        firstResult
+                                    val sig = cachedSignatureTimestamp ?: NewPipeUtils.getSignatureTimestamp(videoId).getOrNull()?.also {
+                                        cachedSignatureTimestamp = it
                                     }
+                                    val streamUrl = resolveStreamUrl(videoId, sig)
                                     if (streamUrl != null) {
                                         Json.encodeToString(StreamDTO(streamUrl))
                                     } else {
@@ -833,66 +834,11 @@ fun main(args: Array<String>) {
                                  }
                              }
                          }
-                        
-                             val clients = listOf(
-                                 YouTubeClient.ANDROID_MUSIC,
-                                 YouTubeClient.ANDROID_VR_NO_AUTH
-                             )
+                         val sig = cachedSignatureTimestamp ?: NewPipeUtils.getSignatureTimestamp(videoId).getOrNull()?.also {
+                             cachedSignatureTimestamp = it
+                         }
                          
-                         val sig = if (clients.any { it.useSignatureTimestamp }) {
-                             cachedSignatureTimestamp ?: NewPipeUtils.getSignatureTimestamp(videoId).getOrNull()?.also {
-                                 cachedSignatureTimestamp = it
-                             }
-                         } else null
-                         
-                         val streamUrl = coroutineScope {
-                            val deferreds = clients.map { client ->
-                                async(Dispatchers.IO) {
-                                    try {
-                                        val playerResp = YouTube.player(
-                                            videoId = videoId,
-                                            client = client,
-                                            signatureTimestamp = sig
-                                        ).getOrThrow()
-
-                                         val audioFormats = playerResp.streamingData?.adaptiveFormats?.filter { it.isAudio && it.mimeType?.contains("codecs=\"opus\"") != true } ?: emptyList()
-                                         if (audioFormats.isNotEmpty()) {
-                                             val format = audioFormats.maxByOrNull { it.bitrate }!!
-                                            val url = NewPipeUtils.getStreamUrl(format, videoId, client).getOrNull()
-                                            if (url != null) {
-                                                return@async url
-                                            }
-                                        }
-                                    } catch (e: Exception) {
-                                        val msg = e.message?.take(200) ?: "Unknown error"
-                                        System.err.println("[DEBUG] Client ${client.clientName} failed: $msg")
-                                    }
-                                    null
-                                }
-                            }
-
-                            val channel = kotlinx.coroutines.channels.Channel<String>(1)
-                            var activeJobs = deferreds.size
-                            deferreds.forEach { deferred ->
-                                launch {
-                                    try {
-                                        val res = deferred.await()
-                                        if (res != null) {
-                                            channel.trySend(res)
-                                        }
-                                    } finally {
-                                        activeJobs--
-                                        if (activeJobs == 0) {
-                                            channel.close()
-                                        }
-                                    }
-                                }
-                            }
-
-                            val firstResult = channel.receiveCatching().getOrNull()
-                            deferreds.forEach { it.cancel() }
-                            firstResult
-                        }
+                         val streamUrl = resolveStreamUrl(videoId, sig)
                         
                         if (streamUrl != null) {
                             println(Json.encodeToString(StreamDTO(streamUrl)))

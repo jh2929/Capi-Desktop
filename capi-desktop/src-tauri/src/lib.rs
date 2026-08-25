@@ -29,16 +29,20 @@ pub struct DiscordState {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MediaState {
-    is_playing: bool,
-    title: String,
-    artist: String,
-    album: String,
-    thumbnail: String,
-    duration: f64,
-    position: f64,
-    volume: f64,
-    shuffle: bool,
-    repeat: String,
+    pub is_playing: bool,
+    pub title: String,
+    pub artist: String,
+    pub album: String,
+    pub thumbnail: String,
+    pub duration: f64,
+    pub position: f64,
+    pub volume: f64,
+    pub shuffle: bool,
+    pub repeat: String,
+    #[serde(default)]
+    pub stream_url: String,
+    #[serde(default)]
+    pub track_id: String,
 }
 
 impl Default for MediaState {
@@ -54,14 +58,16 @@ impl Default for MediaState {
             volume: 0.8,
             shuffle: false,
             repeat: "none".to_string(),
+            stream_url: String::new(),
+            track_id: String::new(),
         }
     }
 }
 
 fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std::sync::Arc<std::sync::Mutex<MediaState>>) -> Result<u16, String> {
-    let port = (12761..12771).find(|&p| TcpListener::bind(format!("127.0.0.1:{}", p)).is_ok())
+    let port = (12761..12771).find(|&p| TcpListener::bind(format!("0.0.0.0:{}", p)).is_ok())
         .ok_or("No se pudo encontrar un puerto libre en el rango 12761-12770".to_string())?;
-    let listener = TcpListener::bind(format!("127.0.0.1:{}", port))
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
         .map_err(|e| format!("No se pudo bindear al puerto {}: {}", port, e))?;
     println!("[PROXY] Server started on port {}", port);
     let capi_dir = capi_dir.clone();
@@ -86,8 +92,195 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                         let request = String::from_utf8_lossy(&buffer[..n]);
                         let first_line = request.lines().next().unwrap_or("");
                         let parts: Vec<&str> = first_line.split_whitespace().collect();
-                        if parts.len() >= 2 && parts[0] == "GET" {
+                        if parts.len() >= 2 && (parts[0] == "GET" || parts[0] == "HEAD") {
+                            let is_head = parts[0] == "HEAD";
                             let path_and_query = parts[1];
+
+                            // ─── TV Cast Screen: /tv ────────────────────
+                            if path_and_query == "/tv" || path_and_query.starts_with("/tv?") || path_and_query == "/cast/receiver" {
+                                let html = r#"<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Capi TV</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body, html {
+      width: 100vw;
+      height: 100vh;
+      overflow: hidden;
+      background: #000000;
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    /* Dynamic Full-Screen Blur Backdrop */
+    .bg-blur {
+      position: absolute;
+      top: -15%;
+      left: -15%;
+      width: 130%;
+      height: 130%;
+      background-size: cover;
+      background-position: center;
+      filter: blur(90px) brightness(0.40) saturate(2);
+      transform: scale(1.18);
+      transition: background-image 1.2s cubic-bezier(0.2, 0.8, 0.2, 1);
+      z-index: 1;
+    }
+    .bg-overlay {
+      position: absolute;
+      inset: 0;
+      background: radial-gradient(circle at center, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.75) 100%);
+      z-index: 2;
+    }
+    /* Top Left Capi Logo & Brand */
+    .brand-container {
+      position: absolute;
+      top: 48px;
+      left: 56px;
+      display: flex;
+      align-items: center;
+      gap: 16px;
+      z-index: 10;
+      animation: fadeIn 1s ease;
+    }
+    .brand-logo {
+      width: 44px;
+      height: 44px;
+      border-radius: 14px;
+      background: linear-gradient(135deg, #d0bcff 0%, #381e72 100%);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 8px 32px rgba(208, 188, 255, 0.3);
+    }
+    .brand-logo svg {
+      width: 24px;
+      height: 24px;
+      fill: #ffffff;
+    }
+    .brand-text {
+      font-size: 32px;
+      font-weight: 900;
+      letter-spacing: -0.04em;
+      color: #ffffff;
+      text-shadow: 0 2px 20px rgba(0,0,0,0.8);
+    }
+    /* Center: Only the Cover Art */
+    .center-card {
+      position: relative;
+      z-index: 10;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      animation: zoomIn 1s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+    .cover-container {
+      width: 480px;
+      height: 480px;
+      max-width: 68vh;
+      max-height: 68vh;
+      border-radius: 36px;
+      overflow: hidden;
+      box-shadow: 0 30px 90px rgba(0, 0, 0, 0.9), 0 0 80px rgba(208, 188, 255, 0.2);
+      border: 2px solid rgba(255, 255, 255, 0.18);
+      background: #121214;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: transform 0.6s ease;
+    }
+    .cover-img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      display: block;
+      transition: opacity 0.5s ease;
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    @keyframes zoomIn {
+      from { opacity: 0; transform: scale(0.92); }
+      to { opacity: 1; transform: scale(1); }
+    }
+    audio { display: none; }
+  </style>
+</head>
+<body>
+  <div class="bg-blur" id="bgBlur"></div>
+  <div class="bg-overlay"></div>
+
+  <!-- Top-Left Branding -->
+  <div class="brand-container">
+    <div class="brand-logo">
+      <svg viewBox="0 0 24 24"><path d="M12 3v10.55c-.59-.34-1.27-.55-2-.55-2.21 0-4 1.79-4 4s1.79 4 4 4 4-1.79 4-4V7h4V3h-6z"/></svg>
+    </div>
+    <span class="brand-text">Capi</span>
+  </div>
+
+  <!-- Centered Album Cover Only -->
+  <div class="center-card">
+    <div class="cover-container">
+      <img id="coverImg" class="cover-img" src="/assets/Logo.png" alt="Cover Art">
+    </div>
+  </div>
+
+  <audio id="tvAudio" autoplay preload="auto"></audio>
+
+  <script>
+    const coverImg = document.getElementById('coverImg');
+    const bgBlur = document.getElementById('bgBlur');
+    const tvAudio = document.getElementById('tvAudio');
+    let lastTrackId = '';
+
+    async function sync() {
+      try {
+        const res = await fetch('/api/state');
+        if (!res.ok) return;
+        const s = await res.json();
+        if (s) {
+          if (s.thumbnail && coverImg.src !== s.thumbnail) {
+            coverImg.src = s.thumbnail;
+            bgBlur.style.backgroundImage = `url('${s.thumbnail}')`;
+          }
+          if (s.track_id && s.track_id !== lastTrackId && s.stream_url) {
+            lastTrackId = s.track_id;
+            tvAudio.src = s.stream_url;
+            tvAudio.play().catch(() => {});
+          }
+          if (s.is_playing && tvAudio.paused && tvAudio.src) {
+            tvAudio.play().catch(() => {});
+          } else if (!s.is_playing && !tvAudio.paused) {
+            tvAudio.pause();
+          }
+        }
+      } catch (e) {}
+    }
+
+    setInterval(sync, 1000);
+    sync();
+
+    // Auto unlock audio playback on any remote/screen click
+    document.addEventListener('click', () => {
+      if (tvAudio.paused && tvAudio.src) tvAudio.play().catch(() => {});
+    });
+  </script>
+</body>
+</html>"#;
+                                let cors = "Access-Control-Allow-Origin: *\r\nConnection: close\r\n";
+                                let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n{}Content-Length: {}\r\n\r\n", cors, html.len()).as_bytes());
+                                if !is_head { let _ = stream.write_all(html.as_bytes()); }
+                                return;
+                            }
                             
                             // ─── Media Control API ─────────────────────
                             if path_and_query.starts_with("/api/") {
@@ -97,19 +290,19 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                                         let _ = app.emit("mpris-command", serde_json::json!({"action": "play-pause"}));
                                         let body = b"{\"ok\":true}";
                                         let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n", cors, body.len()).as_bytes());
-                                        let _ = stream.write_all(body);
+                                        if !is_head { let _ = stream.write_all(body); }
                                     }
                                     p if p == "/api/next" => {
                                         let _ = app.emit("mpris-command", serde_json::json!({"action": "next"}));
                                         let body = b"{\"ok\":true}";
                                         let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n", cors, body.len()).as_bytes());
-                                        let _ = stream.write_all(body);
+                                        if !is_head { let _ = stream.write_all(body); }
                                     }
                                     p if p == "/api/prev" => {
                                         let _ = app.emit("mpris-command", serde_json::json!({"action": "prev"}));
                                         let body = b"{\"ok\":true}";
                                         let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n", cors, body.len()).as_bytes());
-                                        let _ = stream.write_all(body);
+                                        if !is_head { let _ = stream.write_all(body); }
                                     }
                                     p if p.starts_with("/api/volume") => {
                                         let resp = if let Some(level_str) = p.split("level=").nth(1) {
@@ -184,10 +377,12 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                                             status_line, content_type, content_length, cache_control
                                         );
                                         let _ = stream.write_all(response_headers.as_bytes());
-                                        let mut buf = [0; 65536];
-                                        while let Ok(n) = resp.read(&mut buf) {
-                                            if n == 0 { break; }
-                                            if stream.write_all(&buf[..n]).is_err() { break; }
+                                        if !is_head {
+                                            let mut buf = [0; 65536];
+                                            while let Ok(n) = resp.read(&mut buf) {
+                                                if n == 0 { break; }
+                                                if stream.write_all(&buf[..n]).is_err() { break; }
+                                            }
                                         }
                                     } else {
                                         let resp = "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
@@ -232,7 +427,7 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                                     
                                     let content_type = headers.get("content-type")
                                         .and_then(|h| h.to_str().ok())
-                                        .unwrap_or("audio/webm");
+                                        .unwrap_or("audio/mp4");
                                     let content_length = headers.get("content-length")
                                         .and_then(|h| h.to_str().ok())
                                         .unwrap_or("0");
@@ -253,20 +448,22 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                                     let _ = stream.set_nodelay(true);
                                     if stream.write_all(response_headers.as_bytes()).is_ok() {
                                          stream.flush().ok();
-                                         let mut buf = [0; 65536];
-                                         let mut total_bytes = 0;
-                                         let write_start = std::time::Instant::now();
-                                         while let Ok(bytes_read) = response.read(&mut buf) {
-                                             if bytes_read == 0 {
-                                                 break;
+                                         if !is_head {
+                                             let mut buf = [0; 65536];
+                                             let mut total_bytes = 0;
+                                             let write_start = std::time::Instant::now();
+                                             while let Ok(bytes_read) = response.read(&mut buf) {
+                                                 if bytes_read == 0 {
+                                                     break;
+                                                 }
+                                                 if stream.write_all(&buf[..bytes_read]).is_err() {
+                                                     break;
+                                                 }
+                                                 let _ = stream.flush();
+                                                 total_bytes += bytes_read;
                                              }
-                                             if stream.write_all(&buf[..bytes_read]).is_err() {
-                                                 break;
-                                             }
-                                             let _ = stream.flush();
-                                             total_bytes += bytes_read;
+                                             println!("[PROXY] Finished sending stream. Total bytes: {} | Time: {}ms", total_bytes, write_start.elapsed().as_millis());
                                          }
-                                         println!("[PROXY] Finished sending stream. Total bytes: {} | Time: {}ms", total_bytes, write_start.elapsed().as_millis());
                                      }
                                      return;
                                 }
@@ -498,22 +695,10 @@ async fn send_daemon_command(
         Ok(Err(join_err)) => Err(format!("Daemon thread error: {}", join_err)),
         Err(_elapsed) => {
             let ts = chrono_timestamp();
-            eprintln!("[DAEMON] [{ts}] Command timed out, closing stdin to unblock daemon...");
-            // Close stdin to unblock the daemon (daemon sees EOF → exits cleanly)
+            eprintln!("[DAEMON] [{ts}] Command timed out, killing daemon...");
             if let Ok(mut guard) = child_clone.lock() {
-                let _ = guard.stdin.take();
-            }
-            // Wait for the daemon to exit (releases mutexes held by spawned task)
-            for _ in 0..20 {
-                let exited = match child_clone.lock() {
-                    Ok(mut guard) => guard.try_wait().ok().flatten().is_some(),
-                    Err(_) => true,
-                };
-                if exited {
-                    eprintln!("[DAEMON] [{ts}] Daemon exited after stdin close");
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                let _ = guard.kill();
+                let _ = guard.wait();
             }
             Err("El daemon dejó de responder".to_string())
         }
@@ -612,27 +797,7 @@ fn restart_daemon(app: &tauri::AppHandle, reason: &str) -> Result<(), String> {
     let ts = chrono_timestamp();
     println!("[DAEMON] [{ts}] Restarted successfully (reason: {reason})");
     let _ = app.emit("daemon-restarted", serde_json::json!({"timestamp": ts, "reason": reason}));
-
-    // Fire-and-forget: refresh PO tokens on the fresh daemon (they regenerate at startup,
-    // but a second refresh heals stale tokens and warms the YouTube session)
-    let app2 = app.clone();
-    let daemon2 = app.state::<Arc<DaemonProcess>>().inner().clone();
-    let child2 = app.state::<Arc<Mutex<std::process::Child>>>().inner().clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_secs(1));
-        let rt = tokio::runtime::Runtime::new();
-        if let Ok(rt) = rt {
-            rt.block_on(async {
-                let _ = send_daemon_command(
-                    daemon2,
-                    child2,
-                    r#"{"action":"refresh-tokens"}"#.to_string(),
-                ).await;
-                println!("[DAEMON] [{ts}] Post-restart token refresh completed");
-                let _ = app2.emit("daemon-ready", ());
-            });
-        }
-    });
+    let _ = app.emit("daemon-ready", ());
     Ok(())
 }
 
@@ -1004,6 +1169,550 @@ async fn obtener_sugerencias(query: String) -> Result<String, String> {
 #[tauri::command]
 fn obtener_local_port(state: tauri::State<'_, LocalServerState>) -> u16 {
     state.port
+}
+
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+pub struct DispositivoCastDTO {
+    pub id: String,
+    pub name: String,
+    pub r#type: String,
+    pub model: String,
+    pub ip: String,
+    pub port: u16,
+    pub location: Option<String>,
+    pub control_url: Option<String>,
+}
+
+fn resolver_ip_local_para_tv(target_ip: &str) -> String {
+    if let Ok(target_addr) = format!("{}:80", target_ip).parse::<std::net::SocketAddr>() {
+        if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+            if socket.connect(target_addr).is_ok() {
+                if let Ok(local) = socket.local_addr() {
+                    return local.ip().to_string();
+                }
+            }
+        }
+    }
+    "127.0.0.1".to_string()
+}
+
+fn get_local_subnet_ips() -> (String, Vec<String>) {
+    let mut local_ip = "127.0.0.1".to_string();
+    if let Ok(socket) = std::net::UdpSocket::bind("0.0.0.0:0") {
+        if socket.connect("8.8.8.8:80").is_ok() {
+            if let Ok(addr) = socket.local_addr() {
+                local_ip = addr.ip().to_string();
+            }
+        }
+    }
+
+    let mut ips = Vec::new();
+    let parts: Vec<&str> = local_ip.split('.').collect();
+    if parts.len() == 4 {
+        let prefix = format!("{}.{}.{}", parts[0], parts[1], parts[2]);
+        for i in 1..=254 {
+            ips.push(format!("{}.{}", prefix, i));
+        }
+    }
+    (local_ip, ips)
+}
+
+#[tauri::command]
+async fn descubrir_dispositivos_cast() -> Result<Vec<DispositivoCastDTO>, String> {
+    let mut devices: Vec<DispositivoCastDTO> = Vec::new();
+    let mut seen_ips: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    // 1. SSDP Discovery via UDP broadcast / multicast
+    let ssdp_requests = [
+        "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: ssdp:all\r\n\r\n",
+        "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n",
+        "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: urn:schemas-upnp-org:service:AVTransport:1\r\n\r\n",
+        "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp:discover\"\r\nMX: 2\r\nST: urn:dial-multiscreen-org:service:dial:1\r\n\r\n",
+    ];
+
+    if let Ok(socket) = tokio::net::UdpSocket::bind("0.0.0.0:0").await {
+        let _ = socket.set_broadcast(true);
+        if let Ok(target_addr) = "239.255.255.250:1900".parse::<std::net::SocketAddr>() {
+            for req in ssdp_requests {
+                let _ = socket.send_to(req.as_bytes(), target_addr).await;
+            }
+
+            let mut buf = [0u8; 4096];
+            let start = std::time::Instant::now();
+            let timeout_dur = std::time::Duration::from_millis(1600);
+
+            while start.elapsed() < timeout_dur {
+                let remaining = timeout_dur.saturating_sub(start.elapsed());
+                if remaining.is_zero() { break; }
+
+                if let Ok(Ok((len, peer))) = tokio::time::timeout(remaining, socket.recv_from(&mut buf)).await {
+                    if let Ok(resp_str) = std::str::from_utf8(&buf[..len]) {
+                        let mut location: Option<String> = None;
+
+                        for line in resp_str.lines() {
+                            let lower = line.to_lowercase();
+                            if lower.starts_with("location:") {
+                                location = Some(line[9..].trim().to_string());
+                            }
+                        }
+
+                        let ip = peer.ip().to_string();
+                        if !seen_ips.contains(&ip) {
+                            seen_ips.insert(ip.clone());
+                            let mut dev_name = format!("Smart TV ({})", ip);
+                            let mut dev_type = "smart_tv".to_string();
+                            let mut dev_model = "Dispositivo de red".to_string();
+                            let mut control_url: Option<String> = None;
+
+                            if let Some(loc) = &location {
+                                if let Ok(client) = reqwest::Client::builder().timeout(std::time::Duration::from_millis(700)).build() {
+                                    if let Ok(xml_resp) = client.get(loc).send().await {
+                                        if let Ok(xml_body) = xml_resp.text().await {
+                                            if let Some(s) = xml_body.find("<friendlyName>") {
+                                                if let Some(e) = xml_body[s..].find("</friendlyName>") {
+                                                    dev_name = xml_body[s + 14..s + e].trim().to_string();
+                                                }
+                                            }
+                                            if let Some(s) = xml_body.find("<modelName>") {
+                                                if let Some(e) = xml_body[s..].find("</modelName>") {
+                                                    dev_model = xml_body[s + 11..s + e].trim().to_string();
+                                                }
+                                            }
+                                            if let Some(av_idx) = xml_body.find("urn:schemas-upnp-org:service:AVTransport:1") {
+                                                if let Some(ctrl_start) = xml_body[av_idx..].find("<controlURL>") {
+                                                    if let Some(ctrl_end) = xml_body[av_idx + ctrl_start..].find("</controlURL>") {
+                                                        let raw_ctrl = xml_body[av_idx + ctrl_start + 12..av_idx + ctrl_start + ctrl_end].trim();
+                                                        if raw_ctrl.starts_with("http") {
+                                                            control_url = Some(raw_ctrl.to_string());
+                                                        } else {
+                                                            let base = if let Ok(parsed_url) = reqwest::Url::parse(loc) {
+                                                                format!("{}://{}:{}", parsed_url.scheme(), parsed_url.host_str().unwrap_or(&ip), parsed_url.port_or_known_default().unwrap_or(peer.port()))
+                                                            } else {
+                                                                format!("http://{}:{}", ip, peer.port())
+                                                            };
+                                                            let formatted_ctrl = if raw_ctrl.starts_with('/') {
+                                                                format!("{}{}", base, raw_ctrl)
+                                                            } else {
+                                                                format!("{}/{}", base, raw_ctrl)
+                                                            };
+                                                            control_url = Some(formatted_ctrl);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            let name_lower = dev_name.to_lowercase();
+                            if name_lower.contains("chromecast") || name_lower.contains("google cast") {
+                                dev_type = "chromecast".to_string();
+                            } else if name_lower.contains("android tv") || name_lower.contains("google tv") || name_lower.contains("bravia") {
+                                dev_type = "android_tv".to_string();
+                            } else if name_lower.contains("nest") || name_lower.contains("speaker") || name_lower.contains("audio") || name_lower.contains("sonos") {
+                                dev_type = "speaker".to_string();
+                            } else if name_lower.contains("samsung") || name_lower.contains("lg") || name_lower.contains("roku") || name_lower.contains("tizen") || name_lower.contains("webos") {
+                                dev_type = "smart_tv".to_string();
+                            }
+
+                            devices.push(DispositivoCastDTO {
+                                id: format!("{}_{}", ip, peer.port()),
+                                name: dev_name,
+                                r#type: dev_type,
+                                model: dev_model,
+                                ip,
+                                port: peer.port(),
+                                location,
+                                control_url,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. High-speed concurrent subnet scan for Smart TVs & Chromecasts
+    let (my_ip, subnet_ips) = get_local_subnet_ips();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_millis(600))
+        .build()
+        .unwrap_or_default();
+
+    let mut scan_tasks = Vec::new();
+    for ip in subnet_ips {
+        if ip == my_ip || seen_ips.contains(&ip) { continue; }
+        let client_clone = client.clone();
+        scan_tasks.push(tokio::spawn(async move {
+            let ports = [8008, 8001, 8060, 3000, 7676, 49152, 49153, 52235, 1400];
+            for port in ports {
+                let addr: Result<std::net::SocketAddr, _> = format!("{}:{}", ip, port).parse();
+                if let Ok(sa) = addr {
+                    if let Ok(Ok(_)) = tokio::time::timeout(std::time::Duration::from_millis(180), tokio::net::TcpStream::connect(&sa)).await {
+                        // Check Chromecast / Google Cast (8008)
+                        if port == 8008 {
+                            let eureka_url = format!("http://{}:8008/setup/eureka_info", ip);
+                            if let Ok(resp) = client_clone.get(&eureka_url).send().await {
+                                if let Ok(text) = resp.text().await {
+                                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&text) {
+                                        let name = json_val.get("name").and_then(|n| n.as_str()).unwrap_or("Chromecast / Google TV").to_string();
+                                        let model = json_val.get("device_info").and_then(|d| d.get("model_name")).and_then(|m| m.as_str()).unwrap_or("Chromecast").to_string();
+                                        return Some(DispositivoCastDTO {
+                                            id: format!("{}_{}", ip, port),
+                                            name,
+                                            r#type: "chromecast".to_string(),
+                                            model,
+                                            ip: ip.clone(),
+                                            port,
+                                            location: Some(eureka_url),
+                                            control_url: None,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
+                        // Check Samsung Smart TV (8001)
+                        if port == 8001 {
+                            let samsung_url = format!("http://{}:8001/api/v2/", ip);
+                            if let Ok(resp) = client_clone.get(&samsung_url).send().await {
+                                if let Ok(text) = resp.text().await {
+                                    if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&text) {
+                                        let name = json_val.get("name").and_then(|n| n.as_str()).unwrap_or("Samsung Smart TV").to_string();
+                                        let model = json_val.get("device").and_then(|d| d.get("modelName")).and_then(|m| m.as_str()).unwrap_or("Samsung Tizen").to_string();
+                                        return Some(DispositivoCastDTO {
+                                            id: format!("{}_{}", ip, port),
+                                            name,
+                                            r#type: "smart_tv".to_string(),
+                                            model,
+                                            ip: ip.clone(),
+                                            port,
+                                            location: Some(samsung_url),
+                                            control_url: None,
+                                        });
+                                    }
+                                }
+                            }
+                        }
+
+                        // Check Roku TV (8060)
+                        if port == 8060 {
+                            let roku_url = format!("http://{}:8060/query/device-info", ip);
+                            if let Ok(resp) = client_clone.get(&roku_url).send().await {
+                                if let Ok(xml) = resp.text().await {
+                                    let mut name = "Roku TV".to_string();
+                                    if let Some(s) = xml.find("<friendly-device-name>") {
+                                        if let Some(e) = xml[s..].find("</friendly-device-name>") {
+                                            name = xml[s + 22..s + e].trim().to_string();
+                                        }
+                                    }
+                                    return Some(DispositivoCastDTO {
+                                        id: format!("{}_{}", ip, port),
+                                        name,
+                                        r#type: "smart_tv".to_string(),
+                                        model: "Roku OS".to_string(),
+                                        ip: ip.clone(),
+                                        port,
+                                        location: Some(roku_url),
+                                        control_url: None,
+                                    });
+                                }
+                            }
+                        }
+
+                        // Generic Smart TV / DLNA MediaRenderer detection
+                        let desc_urls = [
+                            format!("http://{}:{}/description.xml", ip, port),
+                            format!("http://{}:{}/dev/0/desc.xml", ip, port),
+                            format!("http://{}:{}/upnp/desc.xml", ip, port),
+                        ];
+                        for d_url in desc_urls {
+                            if let Ok(resp) = client_clone.get(&d_url).send().await {
+                                if let Ok(xml) = resp.text().await {
+                                    let mut name = format!("Smart TV ({})", ip);
+                                    if let Some(s) = xml.find("<friendlyName>") {
+                                        if let Some(e) = xml[s..].find("</friendlyName>") {
+                                            name = xml[s + 14..s + e].trim().to_string();
+                                        }
+                                    }
+                                    let mut control_url = None;
+                                    if let Some(av_idx) = xml.find("urn:schemas-upnp-org:service:AVTransport:1") {
+                                        if let Some(ctrl_start) = xml[av_idx..].find("<controlURL>") {
+                                            if let Some(ctrl_end) = xml[av_idx + ctrl_start..].find("</controlURL>") {
+                                                let raw_ctrl = xml[av_idx + ctrl_start + 12..av_idx + ctrl_start + ctrl_end].trim();
+                                                control_url = Some(if raw_ctrl.starts_with('/') {
+                                                    format!("http://{}:{}{}", ip, port, raw_ctrl)
+                                                } else {
+                                                    raw_ctrl.to_string()
+                                                });
+                                            }
+                                        }
+                                    }
+                                    return Some(DispositivoCastDTO {
+                                        id: format!("{}_{}", ip, port),
+                                        name,
+                                        r#type: "smart_tv".to_string(),
+                                        model: "Smart TV / DLNA".to_string(),
+                                        ip: ip.clone(),
+                                        port,
+                                        location: Some(d_url),
+                                        control_url,
+                                    });
+                                }
+                            }
+                        }
+
+                        return Some(DispositivoCastDTO {
+                            id: format!("{}_{}", ip, port),
+                            name: format!("Dispositivo de Red ({})", ip),
+                            r#type: "smart_tv".to_string(),
+                            model: format!("Puerto {}", port),
+                            ip: ip.clone(),
+                            port,
+                            location: None,
+                            control_url: None,
+                        });
+                    }
+                }
+            }
+            None
+        }));
+    }
+
+    for task in futures_util::future::join_all(scan_tasks).await {
+        if let Ok(Some(dev)) = task {
+            if !seen_ips.contains(&dev.ip) {
+                seen_ips.insert(dev.ip.clone());
+                devices.push(dev);
+            }
+        }
+    }
+
+    Ok(devices)
+}
+
+#[tauri::command]
+async fn transmitir_a_dispositivo(
+    ip: String,
+    port: u16,
+    stream_url: String,
+    title: String,
+    artist: String,
+    thumbnail: Option<String>,
+    control_url: Option<String>,
+    track_id: Option<String>,
+) -> Result<bool, String> {
+    println!("[CAST] Transmitiendo '{}' por '{}' a {}:{} (Track: {:?}, Thumb: {:?})", title, artist, ip, port, track_id, thumbnail);
+
+    // 1. Resolve host computer's real LAN IP so the TV doesn't try to connect to localhost/127.0.0.1
+    let local_lan_ip = resolver_ip_local_para_tv(&ip);
+    let mut resolved_stream_url = stream_url.clone();
+    if resolved_stream_url.contains("127.0.0.1") {
+        resolved_stream_url = resolved_stream_url.replace("127.0.0.1", &local_lan_ip);
+    } else if resolved_stream_url.contains("localhost") {
+        resolved_stream_url = resolved_stream_url.replace("localhost", &local_lan_ip);
+    }
+
+    let mut resolved_thumbnail = thumbnail.unwrap_or_default();
+    if resolved_thumbnail.contains("127.0.0.1") {
+        resolved_thumbnail = resolved_thumbnail.replace("127.0.0.1", &local_lan_ip);
+    } else if resolved_thumbnail.contains("localhost") {
+        resolved_thumbnail = resolved_thumbnail.replace("localhost", &local_lan_ip);
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // 2. Specialized Roku TV Direct Cast (Port 8060)
+    if port == 8060 {
+        let encoded_u = urlencoding::encode(&resolved_stream_url);
+        let encoded_t = urlencoding::encode(&title);
+        let encoded_a = urlencoding::encode(&artist);
+        let encoded_thumb = urlencoding::encode(&resolved_thumbnail);
+        let roku_urls = [
+            format!("http://{}:8060/launch/15667?u={}&format=mp3&songTitle={}&artistName={}&albumArtUrl={}", ip, encoded_u, encoded_t, encoded_a, encoded_thumb),
+            format!("http://{}:8060/input/15667?u={}&format=mp3", ip, encoded_u),
+            format!("http://{}:8060/launch/playonroku?u={}", ip, encoded_u),
+        ];
+        for r_url in roku_urls {
+            if let Ok(res) = client.post(&r_url).send().await {
+                if res.status().is_success() {
+                    println!("[CAST] Transmisión exitosa a Roku TV: {}", r_url);
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    // 3. DIAL App Launch (Chromecast, Android TV, Google TV, Samsung / LG / Sony TV YouTube)
+    if let Some(ref tid) = track_id {
+        let dial_urls = [
+            format!("http://{}:8008/apps/YouTube", ip),
+            format!("http://{}:{}/apps/YouTube", ip, port),
+            format!("http://{}:8008/apps/YouTube?v={}", ip, tid),
+        ];
+        for d_url in dial_urls {
+            let res = client.post(&d_url)
+                .header("Content-Type", "application/x-www-form-urlencoded")
+                .body(format!("v={}", tid))
+                .send()
+                .await;
+            if let Ok(r) = res {
+                if r.status().is_success() || r.status().as_u16() == 201 {
+                    println!("[CAST] Transmisión DIAL/YouTube exitosa a {}", d_url);
+                    return Ok(true);
+                }
+            }
+        }
+    }
+
+    // 4. DLNA UPnP AVTransport MediaRenderer SOAP Playback
+    let mut dlna_endpoints = Vec::new();
+    if let Some(ctrl) = control_url {
+        dlna_endpoints.push(ctrl);
+    }
+
+    // Probe candidate descriptors to find active AVTransport control URLs
+    let candidate_desc_urls = [
+        format!("http://{}:{}/description.xml", ip, port),
+        format!("http://{}:{}/dev/0/desc.xml", ip, port),
+        format!("http://{}:{}/upnp/desc.xml", ip, port),
+        format!("http://{}:7676/smp_4_", ip),
+        format!("http://{}:7676/smp_23_", ip),
+        format!("http://{}:9197/dmr", ip),
+        format!("http://{}:52235/dmr.xml", ip),
+        format!("http://{}:49152/description.xml", ip),
+        format!("http://{}:49153/description.xml", ip),
+        format!("http://{}:1400/xml/device_description.xml", ip),
+    ];
+
+    for desc_url in candidate_desc_urls {
+        if let Ok(resp) = client.get(&desc_url).send().await {
+            if let Ok(xml) = resp.text().await {
+                if let Some(av_idx) = xml.find("urn:schemas-upnp-org:service:AVTransport:1") {
+                    if let Some(ctrl_start) = xml[av_idx..].find("<controlURL>") {
+                        if let Some(ctrl_end) = xml[av_idx + ctrl_start..].find("</controlURL>") {
+                            let raw_ctrl = xml[av_idx + ctrl_start + 12..av_idx + ctrl_start + ctrl_end].trim();
+                            let formatted = if raw_ctrl.starts_with("http") {
+                                raw_ctrl.to_string()
+                            } else {
+                                let base = if let Ok(parsed_url) = reqwest::Url::parse(&desc_url) {
+                                    format!("{}://{}:{}", parsed_url.scheme(), parsed_url.host_str().unwrap_or(&ip), parsed_url.port_or_known_default().unwrap_or(port))
+                                } else {
+                                    format!("http://{}:{}", ip, port)
+                                };
+                                if raw_ctrl.starts_with('/') {
+                                    format!("{}{}", base, raw_ctrl)
+                                } else {
+                                    format!("{}/{}", base, raw_ctrl)
+                                }
+                            };
+                            if !dlna_endpoints.contains(&formatted) {
+                                dlna_endpoints.push(formatted);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Default standard endpoints
+    dlna_endpoints.push(format!("http://{}:{}/AVTransport/control", ip, port));
+    dlna_endpoints.push(format!("http://{}:{}/upnp/control/AVTransport1", ip, port));
+    dlna_endpoints.push(format!("http://{}:{}/upnp/control/AVTransport", ip, port));
+    dlna_endpoints.push(format!("http://{}:7676/smp_4_", ip));
+    dlna_endpoints.push(format!("http://{}:1400/MediaRenderer/AVTransport/Control", ip));
+
+    let escaped_title = title.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let escaped_artist = artist.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let escaped_url = resolved_stream_url.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+    let escaped_thumb = resolved_thumbnail.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;");
+
+    let stop_body = r#"<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+  <s:Body>
+    <u:Stop xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <InstanceID>0</InstanceID>
+    </u:Stop>
+  </s:Body>
+</s:Envelope>"#;
+
+    let set_uri_body = format!(
+        r#"<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+  <s:Body>
+    <u:SetAVTransportURI xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <InstanceID>0</InstanceID>
+      <CurrentURI>{}</CurrentURI>
+      <CurrentURIMetaData>&lt;DIDL-Lite xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/" xmlns:dlna="urn:schemas-dlna-org:metadata-1-0/"&gt;&lt;item id="0" parentID="-1" restricted="1"&gt;&lt;dc:title&gt;{}&lt;/dc:title&gt;&lt;dc:creator&gt;{}&lt;/dc:creator&gt;&lt;upnp:artist&gt;{}&lt;/upnp:artist&gt;&lt;upnp:albumArtURI dlna:profileID="JPEG_MED"&gt;{}&lt;/upnp:albumArtURI&gt;&lt;upnp:icon&gt;{}&lt;/upnp:icon&gt;&lt;upnp:class&gt;object.item.audioItem.musicTrack&lt;/upnp:class&gt;&lt;res protocolInfo="http-get:*:audio/mpeg:DLNA.ORG_OP=01;DLNA.ORG_CI=0;DLNA.ORG_FLAGS=01700000000000000000000000000000"&gt;{}&lt;/res&gt;&lt;res protocolInfo="http-get:*:audio/mp4:*"&gt;{}&lt;/res&gt;&lt;res protocolInfo="http-get:*:audio/*:*"&gt;{}&lt;/res&gt;&lt;/item&gt;&lt;/DIDL-Lite&gt;</CurrentURIMetaData>
+    </u:SetAVTransportURI>
+  </s:Body>
+</s:Envelope>"#,
+        escaped_url, escaped_title, escaped_artist, escaped_artist, escaped_thumb, escaped_thumb, escaped_url, escaped_url, escaped_url
+    );
+
+    let play_body = r#"<?xml version="1.0" encoding="utf-8"?>
+<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" s:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">
+  <s:Body>
+    <u:Play xmlns:u="urn:schemas-upnp-org:service:AVTransport:1">
+      <InstanceID>0</InstanceID>
+      <Speed>1</Speed>
+    </u:Play>
+  </s:Body>
+</s:Envelope>"#;
+
+    for target_endpoint in dlna_endpoints {
+        let _ = client.post(&target_endpoint)
+            .header("Content-Type", "text/xml; charset=\"utf-8\"")
+            .header("SOAPAction", "\"urn:schemas-upnp-org:service:AVTransport:1#Stop\"")
+            .body(stop_body)
+            .send()
+            .await;
+
+        let set_res = client.post(&target_endpoint)
+            .header("Content-Type", "text/xml; charset=\"utf-8\"")
+            .header("SOAPAction", "\"urn:schemas-upnp-org:service:AVTransport:1#SetAVTransportURI\"")
+            .body(set_uri_body.clone())
+            .send()
+            .await;
+
+        if let Ok(resp) = set_res {
+            if resp.status().is_success() {
+                let _ = client.post(&target_endpoint)
+                    .header("Content-Type", "text/xml; charset=\"utf-8\"")
+                    .header("SOAPAction", "\"urn:schemas-upnp-org:service:AVTransport:1#Play\"")
+                    .body(play_body)
+                    .send()
+                    .await;
+                println!("[CAST] Transmisión DLNA exitosa a {}", target_endpoint);
+                return Ok(true);
+            }
+        }
+    }
+
+    Ok(true)
+}
+
+#[tauri::command]
+fn obtener_info_sistema(
+    app: tauri::AppHandle,
+    child: tauri::State<'_, Arc<Mutex<std::process::Child>>>,
+) -> String {
+    let version = app.package_info().version.to_string();
+    let daemon_pid = child.lock().map(|c| c.id()).unwrap_or(0);
+    serde_json::json!({
+        "app_version": version,
+        "os": std::env::consts::OS,
+        "arch": std::env::consts::ARCH,
+        "daemon_pid": daemon_pid,
+        "backend": "capi-core (daemon Kotlin)",
+        "backend_version": "no expuesta por el daemon"
+    })
+    .to_string()
 }
 
 #[tauri::command]
@@ -1718,6 +2427,7 @@ pub fn run() {
             obtener_nuevos_lanzamientos,
             obtener_sugerencias,
             obtener_local_port,
+            obtener_info_sistema,
             discord_connect,
             discord_update,
             discord_disconnect,
@@ -1733,7 +2443,9 @@ pub fn run() {
             remove_cached_track,
             obtener_espacio_almacenamiento,
             media_update_state,
-            media_get_state
+            media_get_state,
+            descubrir_dispositivos_cast,
+            transmitir_a_dispositivo
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
