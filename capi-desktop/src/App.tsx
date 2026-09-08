@@ -2197,6 +2197,9 @@ function App() {
         setBuffering(true);
       }
       setCurrentTrack(track);
+      if (track.duration && track.duration > 0) {
+        setDuration(track.duration);
+      }
       diagnostics.onMetadataReady(track);
       console.timeLog(`[PLAY-TIMING] ${track.title}`, 'state updates done');
 
@@ -2479,6 +2482,13 @@ function App() {
     try {
       const responseJson = await invoke<string>("buscar_cancion", { query: searchQuery });
       const data = JSON.parse(responseJson);
+
+      if (data && !Array.isArray(data) && data.error) {
+        console.error("Backend search error:", data.error);
+        setErrorModal({ message: "No se pudieron obtener resultados: " + data.error });
+        setTracks([]);
+        return;
+      }
       
       let parsedTracks: Track[] = (Array.isArray(data) ? data : data.tracks || data.results || []).map((t: any) => ({
         id: t.id, title: t.title, artist: (t.artist && t.artist !== "YT Music") ? t.artist : "Artista Desconocido",
@@ -2643,7 +2653,17 @@ function App() {
   };
 
   const handleLoadedMetadata = () => {
-    if (audioRef.current) { setDuration(audioRef.current.duration); }
+    if (!audioRef.current) return;
+    const mediaDuration = audioRef.current.duration;
+    const officialDuration = currentTrack?.duration || 0;
+
+    // En WebKit/macOS con streams AAC/SBR, audioRef.current.duration reporta el doble (~2x)
+    // del tiempo real por el sample rate nominal sin SBR. Priorizamos la duración oficial de YouTube.
+    if (officialDuration > 0) {
+      setDuration(officialDuration);
+    } else if (mediaDuration && !isNaN(mediaDuration) && isFinite(mediaDuration)) {
+      setDuration(mediaDuration);
+    }
   };
 
   const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => {

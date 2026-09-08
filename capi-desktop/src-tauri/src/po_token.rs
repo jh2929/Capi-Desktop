@@ -61,10 +61,20 @@ impl PoTokenPool {
 fn get_binary_path(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
     let binary_name = if cfg!(target_os = "windows") { "capi-core.exe" } else { "capi-core" };
 
-    // Intentar ruta de desarrollo local
+    // Intentar rutas relativas de desarrollo local
+    if let Ok(cwd) = std::env::current_dir() {
+        let rel_path1 = cwd.join("bin").join(binary_name);
+        if rel_path1.exists() {
+            return Ok(rel_path1);
+        }
+        let rel_path2 = cwd.join("capi-desktop").join("bin").join(binary_name);
+        if rel_path2.exists() {
+            return Ok(rel_path2);
+        }
+    }
     #[cfg(target_os = "linux")]
     {
-        let dev_path = std::path::Path::new("/home/emixdy/Documentos/Capi/capi-desktop/bin/capi-core");
+        let dev_path = std::path::Path::new("/home/emixdy/Proyectos/Capi/capi-desktop/bin/capi-core");
         if dev_path.exists() {
             return Ok(dev_path.to_path_buf());
         }
