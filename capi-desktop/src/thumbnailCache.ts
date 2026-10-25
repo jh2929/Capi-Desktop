@@ -1,4 +1,4 @@
-const DB_NAME = "capi_thumbnail_cache";
+const DB_NAME = "capi_thumbnail_cache_v2";
 const DB_VERSION = 1;
 const TTL_MS = 60 * 24 * 60 * 60 * 1000;
 

@@ -3,8 +3,16 @@ import { Music } from "lucide-react";
 import { getCachedThumbnail, setCachedThumbnail } from "./thumbnailCache";
 
 const QUALITY_TRANSFORMS = [
-  (url: string) => url.replace(/=w\d+-h\d+/, "=w600-h600").replace(/=s\d+/, "=s600").replace("/default.jpg", "/hqdefault.jpg"),
-  (url: string) => url.replace(/=w\d+-h\d+/, "=w300-h300").replace(/=s\d+/, "=s300"),
+  (url: string) =>
+    url
+      .replace(/=w\d+-h\d+/, "=w544-h544")
+      .replace(/=s\d+/, "=s544")
+      .replace(/\/(default|mqdefault|hqdefault|sddefault)\.jpg/, "/maxresdefault.jpg"),
+  (url: string) =>
+    url
+      .replace(/=w\d+-h\d+/, "=w300-h300")
+      .replace(/=s\d+/, "=s300")
+      .replace("/maxresdefault.jpg", "/hqdefault.jpg"),
 ];
 
 const stringToColor = (s: string) => {
@@ -124,6 +132,9 @@ export default function SafeImage({ trackId, src, alt, className = "", size }: S
       onError={handleImageError}
       onLoad={handleImageLoad}
       draggable={false}
+      loading="lazy"
+      decoding="async"
+      referrerPolicy="no-referrer"
     />
   );
 }

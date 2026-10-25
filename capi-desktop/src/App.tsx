@@ -62,9 +62,11 @@ interface Track {
 const getHighQualityThumbnail = (url: string) => {
   if (!url) return url;
   let hq = url;
-  hq = hq.replace(/=w\d+-h\d+/, "=w600-h600");
-  hq = hq.replace(/=s\d+/, "=s600");
-  hq = hq.replace("/default.jpg", "/hqdefault.jpg");
+  hq = hq.replace(/=w\d+-h\d+/, "=w544-h544");
+  hq = hq.replace(/=s\d+/, "=s544");
+  for (const size of ["default", "mqdefault", "hqdefault", "sddefault"]) {
+    hq = hq.replace(`/${size}.jpg`, "/maxresdefault.jpg");
+  }
   return hq;
 };
 
