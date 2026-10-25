@@ -26,6 +26,29 @@ struct LocalServerInfo {
     token: String,
 }
 
+#[derive(Clone, Default)]
+struct LocalRoots(Arc<Mutex<Vec<PathBuf>>>);
+
+impl LocalRoots {
+    fn allow(&self, path: &std::path::Path) -> bool {
+        let Ok(mut roots) = self.0.lock() else {
+            return false;
+        };
+        if roots.iter().any(|root| path.starts_with(root)) {
+            return true;
+        }
+        roots.push(path.to_path_buf());
+        roots.len() <= 32
+    }
+
+    fn contains(&self, path: &std::path::Path) -> bool {
+        self.0
+            .lock()
+            .map(|roots| roots.iter().any(|root| path.starts_with(root)))
+            .unwrap_or(false)
+    }
+}
+
 pub struct DiscordState {
     pub client: Mutex<Option<DiscordIpcClient>>,
 }
@@ -67,12 +90,13 @@ impl Default for MediaState {
     }
 }
 
-fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std::sync::Arc<std::sync::Mutex<MediaState>>, token: String) -> Result<u16, String> {
+fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std::sync::Arc<std::sync::Mutex<MediaState>>, token: String, roots: LocalRoots) -> Result<u16, String> {
     let port = (12761..12771).find(|&p| TcpListener::bind(format!("0.0.0.0:{}", p)).is_ok())
         .ok_or("No se pudo encontrar un puerto libre en el rango 12761-12770".to_string())?;
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
         .map_err(|e| format!("No se pudo bindear al puerto {}: {}", port, e))?;
     println!("[PROXY] Server started on port {}", port);
+    let capi_dir = capi_dir.canonicalize().unwrap_or(capi_dir);
     let capi_dir = capi_dir.clone();
     
     let client = reqwest::blocking::Client::builder()
@@ -90,6 +114,8 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                 let app = app.clone();
                 let media_state = media_state.clone();
                 let token = token.clone();
+                let roots = roots.clone();
+                let capi_dir_check = capi_dir.clone();
                 std::thread::spawn(move || {
                     let mut buffer = [0; 4096];
                     if let Ok(n) = stream.read(&mut buffer) {
@@ -509,10 +535,18 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                                         ext_lower == "m4a" || ext_lower == "flac" || ext_lower == "aac"
                                     })
                                     .unwrap_or(false);
-                                let is_allowed = file_path.exists() && file_path.is_file() && (
-                                    file_path.starts_with(&capi_dir) ||
-                                    is_audio_ext
-                                );
+                                let canonical = std::fs::canonicalize(file_path).ok();
+                                let under_root = canonical
+                                    .as_ref()
+                                    .map(|path| {
+                                        path.starts_with(&capi_dir_check)
+                                            || roots.contains(path)
+                                    })
+                                    .unwrap_or(false);
+                                let is_allowed = file_path.exists()
+                                    && file_path.is_file()
+                                    && is_audio_ext
+                                    && under_root;
                                 if is_allowed {
                                     if let Ok(mut file) = File::open(&file_path) {
                                         let file_size = match file.metadata() {
@@ -1517,10 +1551,13 @@ fn seleccionar_carpeta() -> Option<String> {
 }
 
 #[tauri::command]
-fn listar_archivos_locales(ruta: String) -> Result<Vec<LocalTrack>, String> {
+fn listar_archivos_locales(ruta: String, roots: tauri::State<'_, LocalRoots>) -> Result<Vec<LocalTrack>, String> {
     let dir_path = std::path::Path::new(&ruta);
     if !dir_path.exists() || !dir_path.is_dir() {
         return Err("La ruta no existe o no es un directorio".to_string());
+    }
+    if let Ok(canonical) = dir_path.canonicalize() {
+        let _ = roots.allow(&canonical);
     }
 
     let mut tracks = Vec::new();
@@ -2004,13 +2041,16 @@ pub fn run() {
                     .ok()
                     .filter(|t| t.len() >= 16)
                     .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+                let local_roots = LocalRoots::default();
                 let local_port = start_local_server(
                     capi_dir,
                     handle.clone(),
                     proxy_media_state,
                     token.clone(),
+                    local_roots.clone(),
                 )?;
                 app.manage(LocalServerState { port: local_port, token });
+                app.manage(local_roots);
                 app.manage(DiscordState { client: Mutex::new(None) });
                 Ok(())
             })() {
