@@ -111,13 +111,37 @@ frontend.
 - La app instalada antigua y su daemon siguen corriendo aparte; no forman
   parte del build nuevo.
 
+### Endurecimiento del proxy local (completado)
+
+- Token aleatorio de 128 bits por sesión, obligatorio en `/play`, `/image`,
+  `/api/*` y `/tv`. Sin token se responde **403**.
+- `/play?url=` solo acepta hosts `*.googlevideo.com` y HTTPS.
+- `/image?url=` solo acepta `*.ytimg.com`, `*.googleusercontent.com` y
+  `*.ggpht.com`.
+- La página de TV recibe el token inyectado para su polling de `/api/state`.
+- El frontend obtiene `{ port, token }` de `obtener_local_port` y lo añade a
+  las URLs de reproducción.
+- `CAPI_PROXY_TOKEN` permite fijar el token en pruebas.
+
+Verificado con la app real y `curl`:
+
+| Petición | Resultado |
+|---|---|
+| `/api/state` sin token | 403 |
+| `/api/state?token=…` | 200 |
+| `/tv` sin token | 403 |
+| `/tv?token=…` | 200, token inyectado |
+| `/play?url=https://example.com/...` con token | 403 (host no permitido) |
+| `/play?url=<googlevideo>&token=…` + Range | **206**, 1 KB |
+| mismo stream sin token | 403 |
+
 ### Pendiente antes del release
 
 1. QA de runtime con un perfil limpio: búsqueda, play, álbum, playlist, artista,
    letras y descargas.
 2. Probar Windows y macOS (especialmente M4A/AAC en WebView).
-3. Sustituir el proxy local por una versión loopback + token y eliminar el
-   modo abierto.
+3. Restringir `/play?path=` a raíces de biblioteca registradas (hoy exige token
+   pero acepta cualquier archivo con extensión de audio).
 4. Migrar descargas/caché a Rust o dejarlas como están hasta la siguiente fase.
 
 ## Siguiente fase
