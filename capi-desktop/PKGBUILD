@@ -6,8 +6,8 @@ pkgver=0.1.0
 pkgrel=3
 pkgdesc="Cliente gráfico para YouTube Music con soporte de descargas y Discord RPC"
 arch=('x86_64')
-url="https://github.com/jh2929/Capi"
-license=('MIT')
+url="https://github.com/jh2929/Capi-Desktop"
+license=('GPL-3.0-only')
 depends=(
   'gtk3'
   'webkit2gtk-4.1'
@@ -30,7 +30,6 @@ package() {
   cd "${srcdir}"
 
   install -Dm755 usr/bin/capi-desktop "${pkgdir}/usr/bin/capi-desktop"
-  install -Dm755 usr/lib/capi/bin/capi-core "${pkgdir}/usr/lib/capi/bin/capi-core"
   install -Dm644 usr/share/applications/capi-desktop.desktop "${pkgdir}/usr/share/applications/capi-desktop.desktop"
   install -Dm644 usr/share/icons/hicolor/128x128/apps/capi-desktop.png "${pkgdir}/usr/share/icons/hicolor/128x128/apps/capi-desktop.png"
   install -Dm644 usr/share/icons/hicolor/256x256/apps/capi-desktop.png "${pkgdir}/usr/share/icons/hicolor/256x256/apps/capi-desktop.png"
