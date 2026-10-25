@@ -1216,7 +1216,7 @@ function App() {
     if (!currentTrack) return;
     const nextTrack = getNextTrackToPlay();
     // Skip preload for playlist/radio IDs - they need playlist resolution first
-    const isPlaylistId = nextTrack && (nextTrack.id.startsWith('RDCLAK') || nextTrack.id.startsWith('OLAK') || nextTrack.id.startsWith('PL') || nextTrack.id.startsWith('local://'));
+    const isPlaylistId = nextTrack && (nextTrack.id.startsWith('RDCLAK') || nextTrack.id.startsWith('OLAK') || nextTrack.id.startsWith('PL') || nextTrack.id.startsWith('MPREb') || nextTrack.id.startsWith('local://'));
     if (nextTrack && !isPlaylistId && !downloads[nextTrack.id] && !streamCacheRef.current[nextTrack.id]) {
       invoke<string>("obtener_stream", { id: nextTrack.id }).then(resultJson => {
         let stream = resultJson;
@@ -2145,7 +2145,7 @@ function App() {
 
     try {
       // Detect playlist/radio IDs and resolve them into actual songs first
-      const isPlaylistId = track.id.startsWith('RDCLAK') || track.id.startsWith('OLAK') || track.id.startsWith('PL');
+      const isPlaylistId = track.id.startsWith('RDCLAK') || track.id.startsWith('OLAK') || track.id.startsWith('PL') || track.id.startsWith('MPREb');
       if (isPlaylistId) {
         console.log(`[PLAY] Detected playlist ID: ${track.id}, resolving songs...`);
         setLoading(true);
