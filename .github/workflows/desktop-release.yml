@@ -22,200 +22,87 @@ on:
 
 concurrency:
   group: desktop-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # ──────────────────────────────────────────────────────────────────────
-  # Windows: capi-core.exe
-  # ──────────────────────────────────────────────────────────────────────
-  binaries-windows:
-    name: capi-core.exe (Windows)
-    if: >
-      github.event_name == 'workflow_dispatch' &&
-      (inputs.target == 'all' || inputs.target == 'windows')
-      || github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: windows-latest
-    timeout-minutes: 60
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up GraalVM JDK 21
-        uses: graalvm/setup-graalvm@v1
-        with:
-          java-version: "21"
-          distribution: "graalvm"
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          cache: gradle
-
-      - name: Grant execute permission to gradlew
-        run: chmod +x gradlew
-
-      - name: Set up MSVC (required by GraalVM native-image on Windows)
-        uses: ilammy/msvc-dev-cmd@v1
-
-      - name: Build capi-core native image
-        run: ./gradlew :capi-core:nativeCompile --no-daemon --no-configuration-cache
-
-      - name: Upload capi-core.exe artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: capi-core-windows
-          path: capi-core/build/native/nativeCompile/capi-core.exe
-          retention-days: 30
-
-  # ──────────────────────────────────────────────────────────────────────
-  # macOS: capi-core (Mach-O binary)
-  # ──────────────────────────────────────────────────────────────────────
-  binaries-macos:
-    name: capi-core (macOS)
-    if: >
-      github.event_name == 'workflow_dispatch' &&
-      (inputs.target == 'all' || inputs.target == 'macos')
-      || github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: macos-latest
-    timeout-minutes: 60
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up GraalVM JDK 21
-        uses: graalvm/setup-graalvm@v1
-        with:
-          java-version: "21"
-          distribution: "graalvm"
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          cache: gradle
-
-      - name: Grant execute permission to gradlew
-        run: chmod +x gradlew
-
-      - name: Build capi-core native image
-        run: ./gradlew :capi-core:nativeCompile --no-daemon --no-configuration-cache
-
-      - name: Upload capi-core binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: capi-core-macos
-          path: capi-core/build/native/nativeCompile/capi-core
-          retention-days: 30
-
-  # ──────────────────────────────────────────────────────────────────────
-  # Linux: capi-core (ELF binary)
-  # ──────────────────────────────────────────────────────────────────────
-  binaries-linux:
-    name: capi-core (Linux)
-    if: >
-      github.event_name == 'workflow_dispatch' &&
-      (inputs.target == 'all' || inputs.target == 'linux')
-      || github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up GraalVM JDK 21
-        uses: graalvm/setup-graalvm@v1
-        with:
-          java-version: "21"
-          distribution: "graalvm"
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          cache: gradle
-
-      - name: Grant execute permission to gradlew
-        run: chmod +x gradlew
-
-      - name: Install Tauri system dependencies (needed by native-image)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev build-essential libssl-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
-
-      - name: Build capi-core native image
-        run: ./gradlew :capi-core:nativeCompile --no-daemon --no-configuration-cache
-
-      - name: Upload capi-core binary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: capi-core-linux
-          path: capi-core/build/native/nativeCompile/capi-core
-          retention-days: 30
-
-  # ──────────────────────────────────────────────────────────────────────
-  # Windows desktop (.msi / .exe)
-  # ──────────────────────────────────────────────────────────────────────
   desktop-windows:
     name: Windows (.msi/.exe)
     if: >
-      github.event_name == 'workflow_dispatch' &&
-      (inputs.target == 'all' || inputs.target == 'windows')
-      || github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [binaries-windows]
+      (github.event_name == 'workflow_dispatch' && (inputs.target == 'all' || inputs.target == 'windows'))
+      || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: windows-latest
     timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download capi-core.exe
-        uses: actions/download-artifact@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
         with:
-          name: capi-core-windows
-          path: capi-desktop/bin/
+          node-version: 22
+          cache: npm
+          cache-dependency-path: capi-desktop/package-lock.json
 
-      - name: Set up Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: capi-desktop/src-tauri -> target
 
       - name: Install npm dependencies
         run: npm ci
         working-directory: capi-desktop
 
-      - name: Build Capi Desktop for Windows
+      - name: Build Capi Desktop
         run: npm run tauri build
         working-directory: capi-desktop
 
-      - name: Upload Windows installer bundle
+      - name: Upload Windows installers
         uses: actions/upload-artifact@v4
         with:
           name: Capi-Windows
+          if-no-files-found: error
           path: |
-            capi-desktop/src-tauri/target/release/bundle/**/*.msi
-            capi-desktop/src-tauri/target/release/bundle/**/*.exe
+            capi-desktop/src-tauri/target/release/bundle/msi/*.msi
+            capi-desktop/src-tauri/target/release/bundle/nsis/*.exe
           retention-days: 30
 
-  # ──────────────────────────────────────────────────────────────────────
-  # macOS desktop (.dmg)
-  # ──────────────────────────────────────────────────────────────────────
   desktop-macos:
     name: macOS (.dmg)
     if: >
-      github.event_name == 'workflow_dispatch' &&
-      (inputs.target == 'all' || inputs.target == 'macos')
-      || github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [binaries-macos]
+      (github.event_name == 'workflow_dispatch' && (inputs.target == 'all' || inputs.target == 'macos'))
+      || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
     runs-on: macos-latest
     timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download capi-core binary
-        uses: actions/download-artifact@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
         with:
-          name: capi-core-macos
-          path: capi-desktop/bin/
+          node-version: 22
+          cache: npm
+          cache-dependency-path: capi-desktop/package-lock.json
 
-      - name: Set up Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: capi-desktop/src-tauri -> target
 
       - name: Install npm dependencies
         run: npm ci
         working-directory: capi-desktop
 
-      - name: Build Capi Desktop for macOS
+      - name: Build Capi Desktop
         run: npm run tauri build
         working-directory: capi-desktop
 
@@ -223,33 +110,27 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Capi-macOS
-          path: capi-desktop/src-tauri/target/release/bundle/**/*.dmg
+          if-no-files-found: error
+          path: capi-desktop/src-tauri/target/release/bundle/dmg/*.dmg
           retention-days: 30
 
-  # ──────────────────────────────────────────────────────────────────────
-  # Linux desktop (.deb / .AppImage / .rpm)
-  # ──────────────────────────────────────────────────────────────────────
   desktop-linux:
     name: Linux (.deb/.AppImage/.rpm)
     if: >
-      github.event_name == 'workflow_dispatch' &&
-      (inputs.target == 'all' || inputs.target == 'linux')
-      || github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [binaries-linux]
-    runs-on: ubuntu-latest
+      (github.event_name == 'workflow_dispatch' && (inputs.target == 'all' || inputs.target == 'linux'))
+      || (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v'))
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download capi-core binary
-        uses: actions/download-artifact@v4
+      - name: Set up Node
+        uses: actions/setup-node@v4
         with:
-          name: capi-core-linux
-          path: capi-desktop/bin/
-
-      - name: Grant execute permission to daemon binary
-        run: chmod +x capi-desktop/bin/capi-core
+          node-version: 22
+          cache: npm
+          cache-dependency-path: capi-desktop/package-lock.json
 
       - name: Install Tauri system dependencies
         run: |
@@ -257,20 +138,29 @@ jobs:
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
             build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
             libssl-dev \
             libgtk-3-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
             patchelf
 
-      - name: Set up Rust toolchain
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: capi-desktop/src-tauri -> target
 
       - name: Install npm dependencies
         run: npm ci
         working-directory: capi-desktop
 
-      - name: Build Capi Desktop for Linux
+      - name: Build Capi Desktop
         run: npm run tauri build -- --bundles deb,appimage,rpm
         working-directory: capi-desktop
 
@@ -278,15 +168,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Capi-Linux
+          if-no-files-found: error
           path: |
-            capi-desktop/src-tauri/target/release/bundle/**/*.deb
-            capi-desktop/src-tauri/target/release/bundle/**/*.rpm
-            capi-desktop/src-tauri/target/release/bundle/**/*.AppImage
+            capi-desktop/src-tauri/target/release/bundle/deb/*.deb
+            capi-desktop/src-tauri/target/release/bundle/rpm/*.rpm
+            capi-desktop/src-tauri/target/release/bundle/appimage/*.AppImage
           retention-days: 30
 
-  # ──────────────────────────────────────────────────────────────────────
-  # Unified release (only on tag pushes)
-  # ──────────────────────────────────────────────────────────────────────
   release:
     name: Create GitHub Release
     if: >
@@ -297,7 +185,7 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Download platform installer artifacts
+      - name: Download installers
         uses: actions/download-artifact@v4
         with:
           path: /tmp/release-artifacts
@@ -308,5 +196,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: /tmp/release-artifacts/**/*
+          fail_on_unmatched_files: true
           generate_release_notes: true
           draft: false
