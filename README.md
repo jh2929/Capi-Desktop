@@ -10,7 +10,7 @@
 
 
 
-Capi es un reproductor de música de escritorio premium, moderno y ultrarrápido desarrollado sobre **Tauri (Rust)** y **React (TypeScript)**, utilizando un daemon optimizado en **Kotlin** para comunicarse fluidamente con la API de YouTube Music sin anuncios ni bloqueos.
+Capi es un reproductor de música de escritorio premium, moderno y ultrarrápido desarrollado sobre **Tauri (Rust)** y **React (TypeScript)**. El catálogo, la resolución de streams y las letras los resuelve un motor propio en Rust (**`capi-engine`**) dentro del proceso de la app, sin daemons ni binarios externos, comunicándose con YouTube Music sin anuncios ni bloqueos.
 
 Este software se distribuye bajo los términos de la **Licencia Pública General de GNU v3.0 (GPL-3.0)**.
 
@@ -22,7 +22,7 @@ Capi nació de una frustración simple y compartida: la falta de un cliente de e
 
 Decidimos cambiar eso. La meta era clara: traer la mejor experiencia móvil de streaming de música a la PC en un cliente nativo ligero.
 
-El desarrollo comenzó con una meta ambiciosa. Gracias a una arquitectura limpia basada en Tauri + Rust y un microservicio en Kotlin para resolver la carga de los streams de audio, **logramos hacer la primera prueba con éxito en menos de 2 horas desde el día 1**. Desde esa primera ejecución exitosa supimos que Capi iba a ser algo grande. Lo que comenzó como un prototipo veloz de dos horas se ha transformado en un reproductor de música premium con un rendimiento excepcional y un consumo mínimo de memoria.
+El desarrollo comenzó con una meta ambiciosa. Gracias a una arquitectura limpia basada en Tauri + Rust, **logramos hacer la primera prueba con éxito en menos de 2 horas desde el día 1**. La primera versión usaba un microservicio en Kotlin para resolver los streams; hoy ese daemon fue reemplazado por `capi-engine`, un motor Rust embebido que elimina el proceso externo, el protocolo por tuberías y los reinicios. Lo que comenzó como un prototipo veloz de dos horas se ha transformado en un reproductor de música premium con un rendimiento excepcional y un consumo mínimo de memoria.
 
 ---
 
