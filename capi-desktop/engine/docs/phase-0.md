@@ -155,13 +155,20 @@ Verificado con la app real y `curl`:
 ### Incidencia: «The operation is not supported»
 
 La reproducción fallaba porque WebKit enviaba `Range: bytes=0-` y el proxy lo
-reenviaba tal cual a googlevideo, que responde **403** a rangos abiertos (y a
-rangos mayores de ~1 MiB). El `<audio>` recibía un 403 y lanzaba
-`NotSupportedError`.
+reenviaba tal cual a googlevideo, que responde **403** a rangos abiertos
+(el cliente IOS además limita el resto a ~1 MiB). El `<audio>` recibía un 403
+y lanzaba `NotSupportedError`.
 
-Corrección: el proxy pide siempre un bloque acotado de **1 MiB** y deja que el
-cliente solicite el siguiente; se verificó con `curl` y con `gst-play` a través
-del proxy.
+Corrección doble:
+
+1. El proxy pide siempre un bloque acotado de **1 MiB** y deja que el cliente
+   solicite el siguiente.
+2. El motor resuelve streams con el cliente **VISIONOS** (visitorData, sin PO
+   token), que devuelve URLs con soporte de rangos completos y abiertos. Se
+   descartó IOS para reproducción porque solo sirve ~1 MiB.
+
+Verificado con `curl` a través del proxy (`bytes=0-` → 206, 1 MiB;
+`bytes=1048576-2097151` → 206) y con `gst-play` a través del proxy.
 
 ### Pendiente antes del release
 
