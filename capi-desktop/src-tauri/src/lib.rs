@@ -15,6 +15,8 @@ use capi_engine::Engine;
 use serde::{Serialize, Deserialize};
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
 
+const PROXY_CHUNK_BYTES: u64 = 1_048_576;
+
 struct LocalServerState {
     port: u16,
     token: String,
@@ -463,13 +465,18 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                                     }
                                 }
                                 println!("[PROXY] Incoming request for url: {}", &decoded_url[..std::cmp::min(100, decoded_url.len())]);
-                                let mut req = client.get(&decoded_url);
-                                if let Some(ref r) = range_header {
-                                    println!("[PROXY] Request Range: {:?}", r);
-                                    if let Some(val) = r.split(':').nth(1) {
-                                        req = req.header("Range", val.trim());
-                                    }
-                                }
+                                // YouTube rechaza los rangos abiertos (`bytes=0-`) y
+                                // los rangos grandes con 403. Se pide siempre un
+                                // bloque acotado de 1 MiB; el navegador pedirá el
+                                // siguiente bloque al hacer seek o continuar.
+                                let (chunk_start, chunk_end) = proxy_range(range_header.as_deref());
+                                let req = client
+                                    .get(&decoded_url)
+                                    .header("Range", format!("bytes={}-{}", chunk_start, chunk_end));
+                                println!(
+                                    "[PROXY] Upstream Range: bytes={}-{} (browser: {:?})",
+                                    chunk_start, chunk_end, range_header
+                                );
                                 
                                 let req_start = std::time::Instant::now();
                                 if let Ok(mut response) = req.send() {
@@ -908,6 +915,30 @@ fn obtener_local_port(state: tauri::State<'_, LocalServerState>) -> LocalServerI
     LocalServerInfo {
         port: state.port,
         token: state.token.clone(),
+    }
+}
+
+fn proxy_range(raw: Option<&str>) -> (u64, u64) {
+    let parsed = raw
+        .and_then(|line| line.split(':').nth(1))
+        .and_then(|value| value.trim().strip_prefix("bytes="))
+        .and_then(|value| value.split_once('-'))
+        .and_then(|(start, end)| {
+            let start = start.parse::<u64>().ok()?;
+            let end = if end.is_empty() {
+                start.saturating_add(PROXY_CHUNK_BYTES - 1)
+            } else {
+                end.parse::<u64>().ok()?
+            };
+            Some((start, end))
+        });
+
+    match parsed {
+        Some((start, end)) => {
+            let end = end.min(start.saturating_add(PROXY_CHUNK_BYTES - 1));
+            (start, end.max(start))
+        }
+        None => (0, PROXY_CHUNK_BYTES - 1),
     }
 }
 
@@ -2224,6 +2255,27 @@ mod tests {
         assert!(!has_valid_token("/api/state", "abc"));
         assert!(!has_valid_token("/api/state?token=abcd", "abc"));
         assert!(!has_valid_token("/api/state?token=abc&x=1", "abcd"));
+    }
+
+    #[test]
+    fn proxy_range_limits_open_and_large_ranges() {
+        assert_eq!(proxy_range(None), (0, PROXY_CHUNK_BYTES - 1));
+        assert_eq!(
+            proxy_range(Some("Range: bytes=0-")),
+            (0, PROXY_CHUNK_BYTES - 1)
+        );
+        assert_eq!(
+            proxy_range(Some("Range: bytes=1048576-")),
+            (1_048_576, 2_097_151)
+        );
+        assert_eq!(
+            proxy_range(Some("Range: bytes=0-999")),
+            (0, 999)
+        );
+        assert_eq!(
+            proxy_range(Some("Range: bytes=0-99999999")),
+            (0, PROXY_CHUNK_BYTES - 1)
+        );
     }
 
     #[test]
