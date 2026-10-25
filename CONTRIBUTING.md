@@ -101,5 +101,4 @@ accesibilidad actuales.
 
 ## Seguridad
 
-No publiques vulnerabilidades en issues públicos. Consulta `SECURITY.md` cuando
-esté disponible o contacta de forma privada con el mantenedor.
+No publiques vulnerabilidades en issues públicos. Consulta [SECURITY.md](SECURITY.md) para el canal privado y el alcance.
