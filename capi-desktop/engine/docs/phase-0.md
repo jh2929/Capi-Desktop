@@ -99,6 +99,15 @@ frontend.
 - El binario sidecar ya no se empaqueta ni se versiona.
 - El CI construye directamente la app Tauri con el motor embebido.
 
+### Métricas finales del release (Linux)
+
+- Binario release de la app: **21 MB** (stripped, LTO thin).
+- Instalador `.deb`: **9,6 MB**.
+- Contenido del `.deb`: solo `usr/bin/capi-desktop`, iconos y `.desktop`.
+  **0 entradas `capi-core`**.
+- Tiempo de compilación release en esta máquina: ~16 min.
+- El binario Kotlin anterior pesaba 61 MB por sí solo.
+
 ### Verificación de la retirada
 
 - `npx tsc --noEmit` y `npm run build`: correctos.
