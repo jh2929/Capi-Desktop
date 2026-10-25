@@ -465,17 +465,24 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                                     }
                                 }
                                 println!("[PROXY] Incoming request for url: {}", &decoded_url[..std::cmp::min(100, decoded_url.len())]);
-                                // YouTube rechaza los rangos abiertos (`bytes=0-`) y
-                                // los rangos grandes con 403. Se pide siempre un
-                                // bloque acotado de 1 MiB; el navegador pedirá el
-                                // siguiente bloque al hacer seek o continuar.
+                                // Si el navegador no envió Range, se sirve el
+                                // recurso completo (200) para que el elemento
+                                // <audio> conozca la duración real. Si envió un
+                                // Range, se limita a 1 MiB porque googlevideo
+                                // rechaza los rangos abiertos y los muy grandes.
+                                let wants_full = range_header.is_none();
                                 let (chunk_start, chunk_end) = proxy_range(range_header.as_deref());
+                                let upstream_range = if wants_full {
+                                    "bytes=0-".to_string()
+                                } else {
+                                    format!("bytes={}-{}", chunk_start, chunk_end)
+                                };
                                 let req = client
                                     .get(&decoded_url)
-                                    .header("Range", format!("bytes={}-{}", chunk_start, chunk_end));
+                                    .header("Range", upstream_range.clone());
                                 println!(
-                                    "[PROXY] Upstream Range: bytes={}-{} (browser: {:?})",
-                                    chunk_start, chunk_end, range_header
+                                    "[PROXY] Upstream Range: {} (browser: {:?})",
+                                    upstream_range, range_header
                                 );
                                 
                                 let req_start = std::time::Instant::now();
@@ -491,19 +498,49 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                                     let upstream_length = headers
                                         .get("content-length")
                                         .and_then(|h| h.to_str().ok());
-                                    let status_line = format!("HTTP/1.1 {} {}\r\n", status.as_u16(), status.canonical_reason().unwrap_or("OK"));
+                                    let content_range = headers
+                                        .get("content-range")
+                                        .and_then(|h| h.to_str().ok())
+                                        .map(str::to_string);
+
+                                    let (status_line, content_length, content_range) = if wants_full
+                                        && status == reqwest::StatusCode::PARTIAL_CONTENT
+                                    {
+                                        // `bytes=0-` devuelve el archivo completo como
+                                        // 206; se presenta como 200 para que WebKit
+                                        // no limite la duración al primer bloque.
+                                        let total = content_range
+                                            .as_deref()
+                                            .and_then(|value| value.rsplit('/').next())
+                                            .filter(|value| *value != "*")
+                                            .map(str::to_string)
+                                            .or_else(|| upstream_length.map(str::to_string));
+                                        (
+                                            "HTTP/1.1 200 OK\r\n".to_string(),
+                                            total,
+                                            None,
+                                        )
+                                    } else {
+                                        (
+                                            format!(
+                                                "HTTP/1.1 {} {}\r\n",
+                                                status.as_u16(),
+                                                status.canonical_reason().unwrap_or("OK")
+                                            ),
+                                            upstream_length.map(str::to_string),
+                                            content_range,
+                                        )
+                                    };
+
                                     let mut response_headers = format!(
                                         "{}Content-Type: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n",
                                         status_line, content_type
                                     );
-                                    if let Some(length) = upstream_length {
+                                    if let Some(length) = content_length {
                                         response_headers.push_str(&format!("Content-Length: {}\r\n", length));
                                     }
-                                    
-                                    if let Some(range_val) = headers.get("content-range") {
-                                        if let Ok(rv) = range_val.to_str() {
-                                            response_headers.push_str(&format!("Content-Range: {}\r\n", rv));
-                                        }
+                                    if let Some(range_val) = content_range {
+                                        response_headers.push_str(&format!("Content-Range: {}\r\n", range_val));
                                     }
                                     response_headers.push_str("\r\n");
                                     
