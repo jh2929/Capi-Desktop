@@ -118,6 +118,8 @@ frontend.
 - `/play?url=` solo acepta hosts `*.googlevideo.com` y HTTPS.
 - `/image?url=` solo acepta `*.ytimg.com`, `*.googleusercontent.com` y
   `*.ggpht.com`.
+- `/play?path=` canonicaliza la ruta y solo sirve archivos dentro de
+  `appdata/Capi` o de una carpeta registrada por `listar_archivos_locales`.
 - La página de TV recibe el token inyectado para su polling de `/api/state`.
 - El frontend obtiene `{ port, token }` de `obtener_local_port` y lo añade a
   las URLs de reproducción.
@@ -134,15 +136,15 @@ Verificado con la app real y `curl`:
 | `/play?url=https://example.com/...` con token | 403 (host no permitido) |
 | `/play?url=<googlevideo>&token=…` + Range | **206**, 1 KB |
 | mismo stream sin token | 403 |
+| `/play?path=` dentro de `appdata/Capi` + token | 206 |
+| `/play?path=` fuera de las raíces registradas | 404 |
 
 ### Pendiente antes del release
 
 1. QA de runtime con un perfil limpio: búsqueda, play, álbum, playlist, artista,
    letras y descargas.
 2. Probar Windows y macOS (especialmente M4A/AAC en WebView).
-3. Restringir `/play?path=` a raíces de biblioteca registradas (hoy exige token
-   pero acepta cualquier archivo con extensión de audio).
-4. Migrar descargas/caché a Rust o dejarlas como están hasta la siguiente fase.
+3. Migrar descargas/caché a Rust o dejarlas como están hasta la siguiente fase.
 
 ## Siguiente fase
 
