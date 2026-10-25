@@ -170,6 +170,32 @@ Corrección doble:
 Verificado con `curl` a través del proxy (`bytes=0-` → 206, 1 MiB;
 `bytes=1048576-2097151` → 206) y con `gst-play` a través del proxy.
 
+### Reproducción: final prematuro y saltos de pista
+
+WebKit hace la primera petición de audio **sin cabecera `Range`**. El proxy
+devolvía un `206` de 1 MiB; el elemento `<audio>` interpretaba que el archivo
+duraba eso y disparaba `ended` a mitad de canción, saltando a la siguiente.
+
+Corrección: si la petición no trae `Range`, el proxy pide `bytes=0-`, reescribe
+el `206` upstream a un **`200` con la longitud total** y transmite el archivo
+completo. Las peticiones con `Range` siguen usando bloques de 1 MiB.
+
+Verificado: sin `Range` → `200`, `Content-Length: 3230877`, cuerpo completo;
+`Range: bytes=1048576-2097151` → `206`, 1 MiB.
+
+### Thumbnails
+
+- El motor normaliza las portadas a **544 px** (`=w544-h544`) y convierte
+  `default/hqdefault/sddefault` en `maxresdefault`.
+- Si una pista no trae cover, se usa `i.ytimg.com/vi/<id>/maxresdefault.jpg`.
+- El frontend pide 544 px (no 600, que devolvía 404), usa `maxresdefault` con
+  fallback a `hqdefault` y estrena una caché IndexedDB nueva para descartar los
+  blobs de baja resolución.
+
+### Búsquedas
+
+- Las búsquedas repetidas se cachean 5 minutos en memoria (máx. 64 consultas).
+
 ### Pendiente antes del release
 
 1. QA de runtime con un perfil limpio: búsqueda, play, álbum, playlist, artista,
