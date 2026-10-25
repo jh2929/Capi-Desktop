@@ -88,7 +88,7 @@ export class PlaybackPipelineDetector extends BaseDetector {
           message: `No se pudo resolver la lista de canciones del álbum/playlist: ${evt.payload.reason ?? "motivo desconocido"}`,
           stageId: "metadata_resolve",
           detectorId: this.id,
-          suggestion: "El backend no devolvió la lista de canciones. Comprueba el estado del daemon y la validez del identificador.",
+          suggestion: "El backend no devolvió la lista de canciones. Comprueba el estado del motor y la validez del identificador.",
         });
         break;
 

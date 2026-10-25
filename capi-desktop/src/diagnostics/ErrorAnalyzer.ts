@@ -42,7 +42,7 @@ const COMPONENT_NAMES: Record<string, string> = {
   "playback-pipeline": "Pipeline de reproducción",
   player: "Reproductor multimedia",
   network: "Red",
-  backend: "Backend (daemon Kotlin)",
+  backend: "Backend (capi-engine)",
   cache: "Caché de streams",
   auth: "Autenticación",
   fs: "Sistema de archivos",
@@ -57,15 +57,15 @@ const CODE_CAUSES: Partial<Record<AnomalyCode, string>> = {
   URL_EXPIRED:
     "YouTube Music firma las URLs con validez limitada. Si entre la resolución del stream y el inicio de reproducción pasa demasiado tiempo, la URL caduca.",
   STAGE_TIMEOUT:
-    "La etapa no se completó dentro del tiempo máximo permitido. En la resolución del stream esto suele indicar lentitud o fallo del daemon (red, tokens o API de YouTube Music).",
+    "La etapa no se completó dentro del tiempo máximo permitido. En la resolución del stream esto suele indicar lentitud o fallo del motor (red o API de YouTube Music).",
   STAGE_NEVER_FINISHED:
     "La etapa quedó abierta cuando la reproducción falló: el evento que debía cerrarla nunca llegó.",
   INVALID_STATE_TRANSITION:
     "Las señales del reproductor llegaron en un orden inesperado, lo que suele indicar un fallo en la lógica de orquestación o en el propio reproductor.",
   BACKEND_TIMEOUT:
-    "El daemon Kotlin se quedó bloqueado o fue reiniciado por el watchdog mientras se esperaba su respuesta.",
+    "El motor Rust no respondió dentro del tiempo esperado mientras se resolvía la petición.",
   BACKEND_ERROR:
-    "El daemon Kotlin respondió con un error inesperado; revisa los logs del daemon para conocer el detalle.",
+    "El motor Rust respondió con un error inesperado; revisa los logs del motor para conocer el detalle.",
   NETWORK_ERROR:
     "Hubo un fallo de conectividad entre la aplicación, el proxy local o los servidores de YouTube Music.",
   CONNECTION_LOST: "La conexión de red se interrumpió durante la reproducción.",
@@ -78,12 +78,12 @@ const CODE_CAUSES: Partial<Record<AnomalyCode, string>> = {
   PLAYBACK_NEVER_STARTED:
     "El audio se descargó pero play() no arrancó la reproducción (autoplay rechazado o fallo del reproductor).",
   AUTH_ERROR:
-    "Los tokens PO / visitorData de YouTube Music están caducos o el generador de tokens está fallando.",
+    "La petición de YouTube Music fue rechazada; puede ser contenido restringido o un cambio en la API.",
   CACHE_STALE:
-    "Se reutilizó una URL firmada en caché que puede haber expirado tras un reinicio del backend.",
+    "Se reutilizó una URL firmada en caché que puede haber expirado.",
   FS_MISSING_FILE: "El archivo local se movió, se borró o quedó sin permisos de lectura.",
   PLAYLIST_RESOLVE_FAILED:
-    "El backend no pudo resolver la lista de canciones del álbum/playlist solicitado.",
+    "El motor no pudo resolver la lista de canciones del álbum/playlist solicitado.",
   MISSING_EVENT:
     "Un resultado llegó sin que la etapa correspondiente hubiera comenzado: los eventos del flujo están desincronizados.",
   NULL_RESPONSE: "Una respuesta del sistema llegó nula o incompleta.",
@@ -91,7 +91,7 @@ const CODE_CAUSES: Partial<Record<AnomalyCode, string>> = {
   HTTP_ERROR: "El servidor respondió con un código de error HTTP.",
   PLAYER_ERROR: "El reproductor multimedia del sistema reportó un error al reproducir el audio.",
   DAEMON_RESTARTED:
-    "El daemon de streaming se reinició a mitad de sesión (timeout o muerte del proceso), invalidando las URLs de la sesión anterior.",
+    "El motor de streaming se reinició a mitad de sesión, invalidando las URLs de la sesión anterior.",
   STAGE_TOO_SLOW: "La etapa tardó más de lo habitual, sin llegar a exceder el límite.",
   OTHER: "Causa no determinada con la información disponible.",
 };

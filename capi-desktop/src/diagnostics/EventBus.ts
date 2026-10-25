@@ -3,7 +3,7 @@ import type { BusEvent } from "./types";
 export type EventListener = (evt: BusEvent) => void;
 
 const THREAD_BY_SOURCE: Record<string, string> = {
-  backend: "Daemon (proceso Kotlin)",
+  backend: "Motor Rust (capi-engine)",
   ui: "UI (WebView renderer)",
   player: "UI (WebView renderer)",
   network: "UI (WebView renderer)",

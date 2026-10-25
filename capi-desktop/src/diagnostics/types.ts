@@ -56,7 +56,7 @@ export const PLAYBACK_PIPELINE_STAGES: StageInfo[] = [
     timeoutMs: 45000,
     slowMs: 20000,
     timeoutMessage: "La resolución del stream tardó demasiado (el backend no respondió a tiempo).",
-    timeoutSuggestion: "El daemon Kotlin no devolvió un stream dentro del tiempo permitido. Posibles causas: red lenta, YouTube Music devolviendo errores, o tokens PO/visitorData caducos.",
+    timeoutSuggestion: "El motor Rust no devolvió un stream dentro del tiempo permitido. Posibles causas: red lenta o YouTube Music devolviendo errores.",
     neverFinishedMessage: "La resolución del stream no llegó a completarse.",
   },
   {
@@ -250,7 +250,7 @@ export interface TechnicalInfo {
 export interface ReportSummary {
   /** Nombre corto del error (ej: "URL de stream expirada"). */
   name: string;
-  /** Componente afectado (ej: "Backend (daemon Kotlin)"). */
+  /** Componente afectado (ej: "Backend (capi-engine)"). */
   component: string;
   /** Etapa donde ocurrió (ej: "Validación de URL"). */
   stage: string;

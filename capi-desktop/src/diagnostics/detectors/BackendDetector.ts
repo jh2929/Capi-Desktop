@@ -2,27 +2,27 @@ import type { BusEvent } from "../types";
 import { BaseDetector } from "./Detector";
 
 /**
- * Detector del backend — analiza las respuestas del daemon Kotlin
+ * Detector del backend — analiza las respuestas de capi-engine
  * (obtener_stream, obtener_playlist, etc.) y los eventos de su ciclo de vida
- * (reinicio, timeout) buscando desviaciones del comportamiento esperado.
+ * (timeout, errores de red) buscando desviaciones del comportamiento esperado.
  */
 export class BackendDetector extends BaseDetector {
   readonly id = "backend";
-  readonly name = "Detector del backend (daemon)";
+  readonly name = "Detector del backend (capi-engine)";
 
   onEvent(evt: BusEvent): void {
     switch (evt.type) {
       case "backend.error": {
         const raw = String(evt.payload.reason ?? evt.payload.error ?? "");
         const reason = extractInnerError(raw);
-        if (/daemon|dejó de responder|timeout|timed out|pipe/i.test(raw)) {
+        if (/engine|motor|dejó de responder|timeout|timed out/i.test(raw)) {
           this.engine.reportAnomaly({
             code: "BACKEND_TIMEOUT",
             severity: "error",
-            message: `El backend (daemon Kotlin) no respondió a tiempo; la petición fue cancelada${reason ? ` (${reason})` : ""}.`,
+            message: `El motor Rust no respondió a tiempo; la petición fue cancelada${reason ? ` (${reason})` : ""}.`,
             detectorId: this.id,
             suggestion:
-              "El daemon se quedó bloqueado o se reinició (watchdog). Los reintentos automáticos deberían restaurar la reproducción; si el problema persiste, los tokens PO pueden estar caducos.",
+              "El motor no respondió dentro del plazo. Los reintentos automáticos deberían recuperar la reproducción; si persiste, revisa la red y los logs.",
           });
         } else if (looksLikeNetworkError(raw)) {
           this.engine.reportAnomaly({
@@ -39,7 +39,7 @@ export class BackendDetector extends BaseDetector {
             message: `El backend devolvió un error inesperado: ${reason || "sin detalles"}.`,
             detectorId: this.id,
             suggestion:
-              "La respuesta del daemon no es la esperada. Revisa los logs del daemon y el mensaje de error original.",
+              "La respuesta del motor no es la esperada. Revisa los logs y el mensaje de error original.",
           });
         }
         break;
@@ -47,7 +47,7 @@ export class BackendDetector extends BaseDetector {
 
       case "stream.resolve_failed": {
         const raw = String(evt.payload.reason ?? "");
-        if (looksLikeNetworkError(raw) && !/daemon/i.test(raw)) {
+        if (looksLikeNetworkError(raw) && !/motor|engine/i.test(raw)) {
           this.engine.reportAnomaly({
             code: "NETWORK_ERROR",
             severity: "error",

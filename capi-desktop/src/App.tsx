@@ -960,24 +960,6 @@ function App() {
     return () => { unlisten.then(f => f()); };
   }, []);
 
-  // ─── Daemon lifecycle listener ──────────────────────────────────
-  useEffect(() => {
-    const unlistenRestart = listen<{ timestamp: string; reason: string }>("daemon-restarted", (event) => {
-      console.log(`[DAEMON] Restarted (${event.payload.reason}) at ${event.payload.timestamp}`);
-      diagnostics.onDaemonRestarted(event.payload.reason, event.payload.timestamp);
-      streamCacheRef.current = {};
-      showToast("Motor de streaming reiniciado");
-    });
-    const unlistenReady = listen("daemon-ready", () => {
-      diagnostics.onDaemonReady();
-      showToast("Motor de streaming listo");
-    });
-    return () => {
-      unlistenRestart.then(f => f());
-      unlistenReady.then(f => f());
-    };
-  }, []);
-
   // ─── Emit media state to Rust backend every 3s ────────────────────
   const emitMediaState = useCallback(() => {
     if (!currentTrack) return;
@@ -2833,7 +2815,7 @@ function App() {
     const local = playlists.find(p => p.id === (item.id || item.browseId));
     if (local) return local.tracks;
 
-    // Otherwise, fetch from backend daemon
+    // Otherwise, fetch from the Rust engine
     setLoadingTracksForMenu(true);
     try {
       const response = await invoke<string>("obtener_playlist", { id });

@@ -3,7 +3,7 @@ import { BaseDetector } from "./Detector";
 
 /**
  * Detector de caché — detecta cuando se reutilizan URLs de stream cacheadas
- * que pueden haber quedado caducas (por ejemplo tras un reinicio del daemon,
+ * que pueden haber quedado caducas (por ejemplo tras un reinicio del motor,
  * que invalida las URLs firmadas de la sesión anterior).
  */
 export class CacheDetector extends BaseDetector {
@@ -29,7 +29,7 @@ export class CacheDetector extends BaseDetector {
               "Se usó una URL de stream en caché generada antes del último reinicio del backend. Las URLs firmadas pueden estar caducas.",
             detectorId: this.id,
             suggestion:
-              "Después de reiniciarse el daemon se deberían descartar las URLs cacheadas y volver a resolver el stream.",
+              "Después de reiniciarse el motor se deberían descartar las URLs cacheadas y volver a resolver el stream.",
           });
         }
         break;
