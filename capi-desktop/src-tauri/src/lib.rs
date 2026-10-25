@@ -2212,3 +2212,48 @@ pub fn run() {
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn token_validation_requires_exact_match() {
+        assert!(has_valid_token("/api/state?token=abc", "abc"));
+        assert!(has_valid_token("/play?url=x&token=abc", "abc"));
+        assert!(!has_valid_token("/api/state", "abc"));
+        assert!(!has_valid_token("/api/state?token=abcd", "abc"));
+        assert!(!has_valid_token("/api/state?token=abc&x=1", "abcd"));
+    }
+
+    #[test]
+    fn play_allowlist_only_accepts_googlevideo_https() {
+        assert!(is_allowed_play_url(
+            "https://rr2---sn-uxjov8xo-h5gl.googlevideo.com/videoplayback?itag=140"
+        ));
+        assert!(!is_allowed_play_url(
+            "http://rr2---sn-uxjov8xo-h5gl.googlevideo.com/videoplayback"
+        ));
+        assert!(!is_allowed_play_url("https://example.com/audio.mp4"));
+        assert!(!is_allowed_play_url("https://googlevideo.com.evil.test/a"));
+    }
+
+    #[test]
+    fn image_allowlist_only_accepts_youtube_image_hosts() {
+        assert!(is_allowed_image_url(
+            "https://yt3.googleusercontent.com/abc=w120-h120"
+        ));
+        assert!(is_allowed_image_url("https://i.ytimg.com/vi/x/hqdefault.jpg"));
+        assert!(!is_allowed_image_url("https://example.com/image.jpg"));
+    }
+
+    #[test]
+    fn local_roots_accept_new_roots_and_reject_others() {
+        let roots = LocalRoots::default();
+        let dir = std::env::temp_dir();
+        let canonical = dir.canonicalize().unwrap();
+        assert!(!roots.contains(&canonical));
+        assert!(roots.allow(&canonical));
+        assert!(roots.contains(&canonical));
+    }
+}
