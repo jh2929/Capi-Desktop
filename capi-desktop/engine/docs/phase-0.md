@@ -149,6 +149,19 @@ Verificado con la app real y `curl`:
 | `/play?path=` fuera de las raíces registradas | 404 |
 | archivo vacío | 416 |
 | `Range` con inicio fuera del archivo | 416 |
+| `Range: bytes=0-` (estilo WebKit/GStreamer) a través del proxy | 206, 1 MiB |
+| reproducción completa a través del proxy con `gst-play` | OK |
+
+### Incidencia: «The operation is not supported»
+
+La reproducción fallaba porque WebKit enviaba `Range: bytes=0-` y el proxy lo
+reenviaba tal cual a googlevideo, que responde **403** a rangos abiertos (y a
+rangos mayores de ~1 MiB). El `<audio>` recibía un 403 y lanzaba
+`NotSupportedError`.
+
+Corrección: el proxy pide siempre un bloque acotado de **1 MiB** y deja que el
+cliente solicite el siguiente; se verificó con `curl` y con `gst-play` a través
+del proxy.
 
 ### Pendiente antes del release
 
