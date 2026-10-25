@@ -17,6 +17,13 @@ use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
 
 struct LocalServerState {
     port: u16,
+    token: String,
+}
+
+#[derive(serde::Serialize)]
+struct LocalServerInfo {
+    port: u16,
+    token: String,
 }
 
 pub struct DiscordState {
@@ -60,7 +67,7 @@ impl Default for MediaState {
     }
 }
 
-fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std::sync::Arc<std::sync::Mutex<MediaState>>) -> Result<u16, String> {
+fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std::sync::Arc<std::sync::Mutex<MediaState>>, token: String) -> Result<u16, String> {
     let port = (12761..12771).find(|&p| TcpListener::bind(format!("0.0.0.0:{}", p)).is_ok())
         .ok_or("No se pudo encontrar un puerto libre en el rango 12761-12770".to_string())?;
     let listener = TcpListener::bind(format!("0.0.0.0:{}", port))
@@ -82,6 +89,7 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                 let client = client.clone();
                 let app = app.clone();
                 let media_state = media_state.clone();
+                let token = token.clone();
                 std::thread::spawn(move || {
                     let mut buffer = [0; 4096];
                     if let Ok(n) = stream.read(&mut buffer) {
@@ -91,6 +99,12 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                         if parts.len() >= 2 && (parts[0] == "GET" || parts[0] == "HEAD") {
                             let is_head = parts[0] == "HEAD";
                             let path_and_query = parts[1];
+
+                            if !has_valid_token(path_and_query, &token) {
+                                let resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                                let _ = stream.write_all(resp.as_bytes());
+                                return;
+                            }
 
                             // ─── TV Cast Screen: /tv ────────────────────
                             if path_and_query == "/tv" || path_and_query.starts_with("/tv?") || path_and_query == "/cast/receiver" {
@@ -235,12 +249,13 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
   <script>
     const coverImg = document.getElementById('coverImg');
     const bgBlur = document.getElementById('bgBlur');
+    const CAPI_TOKEN = "__CAPI_TOKEN__";
     const tvAudio = document.getElementById('tvAudio');
     let lastTrackId = '';
 
     async function sync() {
       try {
-        const res = await fetch('/api/state');
+        const res = await fetch('/api/state?token=' + encodeURIComponent(CAPI_TOKEN));
         if (!res.ok) return;
         const s = await res.json();
         if (s) {
@@ -272,6 +287,7 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
   </script>
 </body>
 </html>"#;
+                                let html = html.replace("__CAPI_TOKEN__", &token);
                                 let cors = "Access-Control-Allow-Origin: *\r\nConnection: close\r\n";
                                 let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\n{}Content-Length: {}\r\n\r\n", cors, html.len()).as_bytes());
                                 if !is_head { let _ = stream.write_all(html.as_bytes()); }
@@ -281,7 +297,12 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                             // ─── Media Control API ─────────────────────
                             if path_and_query.starts_with("/api/") {
                                 let cors = "Access-Control-Allow-Origin: *\r\nConnection: close\r\n";
-                                match path_and_query {
+                                let api_path = path_and_query.split('?').next().unwrap_or(path_and_query);
+                                let api_query = path_and_query
+                                    .split_once('?')
+                                    .map(|(_, query)| query)
+                                    .unwrap_or("");
+                                match api_path {
                                     p if p == "/api/play-pause" => {
                                         let _ = app.emit("mpris-command", serde_json::json!({"action": "play-pause"}));
                                         let body = b"{\"ok\":true}";
@@ -300,8 +321,8 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                                         let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n", cors, body.len()).as_bytes());
                                         if !is_head { let _ = stream.write_all(body); }
                                     }
-                                    p if p.starts_with("/api/volume") => {
-                                        let resp = if let Some(level_str) = p.split("level=").nth(1) {
+                                    p if p == "/api/volume" => {
+                                        let resp = if let Some(level_str) = api_query.split("level=").nth(1) {
                                             if let Ok(level) = level_str.split('&').next().unwrap_or("").parse::<f64>() {
                                                 let _ = app.emit("mpris-command", serde_json::json!({"action": "volume", "level": level}));
                                                 "{\"ok\":true}"
@@ -313,8 +334,8 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                                         };
                                         let _ = stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n{}Content-Length: {}\r\n\r\n{}", cors, resp.len(), resp).as_bytes());
                                     }
-                                    p if p.starts_with("/api/seek") => {
-                                        let resp = if let Some(pos_str) = p.split("position=").nth(1) {
+                                    p if p == "/api/seek" => {
+                                        let resp = if let Some(pos_str) = api_query.split("position=").nth(1) {
                                             if let Ok(pos) = pos_str.split('&').next().unwrap_or("").parse::<f64>() {
                                                 let _ = app.emit("mpris-command", serde_json::json!({"action": "seek", "position": pos}));
                                                 "{\"ok\":true}"
@@ -351,11 +372,16 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                             // ─── Image proxy: /image?url=... ───────────
                             if path_and_query.starts_with("/image") {
                                 if let Some(pos) = path_and_query.find("url=") {
-                                    let encoded_url = &path_and_query[pos + 4..];
+                                    let encoded_url = &path_and_query[pos + 4..].split("&token=").next().unwrap_or("");
                                     let img_url = match urlencoding::decode(encoded_url) {
                                         Ok(d) => d.into_owned(),
                                         Err(_) => encoded_url.to_string(),
                                     };
+                                    if !is_allowed_image_url(&img_url) {
+                                        let resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                                        let _ = stream.write_all(resp.as_bytes());
+                                        return;
+                                    }
                                     if let Ok(mut resp) = client.get(&img_url).send() {
                                         let status = resp.status();
                                         let content_type = resp.headers().get("content-type")
@@ -393,11 +419,16 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                             
                             // ─── Audio stream proxy: /play?url=... ─────
                             if let Some(pos) = path_and_query.find("url=") {
-                                let encoded_url = &path_and_query[pos + 4..];
+                                let encoded_url = &path_and_query[pos + 4..].split("&token=").next().unwrap_or("");
                                 let decoded_url = match urlencoding::decode(encoded_url) {
                                     Ok(d) => d.into_owned(),
                                     Err(_) => encoded_url.to_string(),
                                 };
+                                if !is_allowed_play_url(&decoded_url) {
+                                    let resp = "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                                    let _ = stream.write_all(resp.as_bytes());
+                                    return;
+                                }
                                 
                                 let mut range_header = None;
                                 for line in request.lines() {
@@ -464,7 +495,7 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                                      return;
                                 }
                             } else if let Some(pos) = path_and_query.find("path=") {
-                                let encoded_path = &path_and_query[pos + 5..];
+                                let encoded_path = &path_and_query[pos + 5..].split("&token=").next().unwrap_or("");
                                 let decoded_str = match urlencoding::decode(encoded_path) {
                                     Ok(d) => d.into_owned(),
                                     Err(_) => encoded_path.to_string(),
@@ -807,8 +838,54 @@ async fn obtener_sugerencias(engine: tauri::State<'_, Arc<Engine>>, query: Strin
 }
 
 #[tauri::command]
-fn obtener_local_port(state: tauri::State<'_, LocalServerState>) -> u16 {
-    state.port
+fn obtener_local_port(state: tauri::State<'_, LocalServerState>) -> LocalServerInfo {
+    LocalServerInfo {
+        port: state.port,
+        token: state.token.clone(),
+    }
+}
+
+fn has_valid_token(path_and_query: &str, expected: &str) -> bool {
+    let Some((_, query)) = path_and_query.split_once('?') else {
+        return false;
+    };
+    query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("token="))
+        == Some(expected)
+}
+
+fn is_allowed_play_url(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    if url.scheme() != "https" {
+        return false;
+    }
+    matches!(
+        url.host_str(),
+        Some(host)
+            if host == "googlevideo.com" || host.ends_with(".googlevideo.com")
+    )
+}
+
+fn is_allowed_image_url(raw: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(raw) else {
+        return false;
+    };
+    if url.scheme() != "https" {
+        return false;
+    }
+    matches!(
+        url.host_str(),
+        Some(host)
+            if host == "ytimg.com"
+                || host.ends_with(".ytimg.com")
+                || host == "googleusercontent.com"
+                || host.ends_with(".googleusercontent.com")
+                || host == "ggpht.com"
+                || host.ends_with(".ggpht.com")
+    )
 }
 
 #[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
@@ -1923,8 +2000,17 @@ pub fn run() {
                 let proxy_media_state = media_state.clone();
                 app.manage(media_state);
 
-                let local_port = start_local_server(capi_dir, handle.clone(), proxy_media_state)?;
-                app.manage(LocalServerState { port: local_port });
+                let token = std::env::var("CAPI_PROXY_TOKEN")
+                    .ok()
+                    .filter(|t| t.len() >= 16)
+                    .unwrap_or_else(|| uuid::Uuid::new_v4().simple().to_string());
+                let local_port = start_local_server(
+                    capi_dir,
+                    handle.clone(),
+                    proxy_media_state,
+                    token.clone(),
+                )?;
+                app.manage(LocalServerState { port: local_port, token });
                 app.manage(DiscordState { client: Mutex::new(None) });
                 Ok(())
             })() {

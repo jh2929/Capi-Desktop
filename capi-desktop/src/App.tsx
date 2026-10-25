@@ -571,6 +571,7 @@ function App() {
   const playNextRef = useRef<() => void>(() => {});
   const playPrevRef = useRef<() => void>(() => {});
   const [localPort, setLocalPort] = useState<number | null>(null);
+  const [localToken, setLocalToken] = useState<string>("");
   const [scrolled, setScrolled] = useState(false);
   const [artistScrolled, setArtistScrolled] = useState(false);
   const [showShareModal, setShowShareModal] = useState(false);
@@ -580,8 +581,9 @@ function App() {
 
   // Fetch local server port on mount
   useEffect(() => {
-    invoke<number>("obtener_local_port").then(port => {
-      setLocalPort(port);
+    invoke<{ port: number; token: string }>("obtener_local_port").then(info => {
+      setLocalPort(info.port);
+      setLocalToken(info.token);
     }).catch(err => {
       console.error("Error al obtener el puerto del servidor local:", err);
     });
@@ -1228,7 +1230,7 @@ function App() {
           stream = stream.substring(1, stream.length - 1);
         }
         // Wrap in proxy for consistency
-        stream = `http://127.0.0.1:${localPort}/play?url=${encodeURIComponent(stream)}`;
+        stream = `http://127.0.0.1:${localPort}/play?url=${encodeURIComponent(stream)}&token=${localToken}`;
         streamCacheRef.current[nextTrack.id] = stream;
         console.log(`[PRELOAD] Preloaded next track: ${nextTrack.title}`);
       }).catch(err => {
@@ -2205,13 +2207,13 @@ function App() {
         streamSource = "local";
         diagnostics.onStreamResolveStarted(streamSource);
         const path = track.id.replace("local://", "");
-        stream = `http://127.0.0.1:${localPort}/play?path=${encodeURIComponent(path)}`;
+        stream = `http://127.0.0.1:${localPort}/play?path=${encodeURIComponent(path)}&token=${localToken}`;
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'using local custom folder file');
       } else if (downloads[track.id]) {
         streamSource = "download";
         diagnostics.onStreamResolveStarted(streamSource);
         const path = downloads[track.id];
-        stream = `http://127.0.0.1:${localPort}/play?path=${encodeURIComponent(path)}`;
+        stream = `http://127.0.0.1:${localPort}/play?path=${encodeURIComponent(path)}&token=${localToken}`;
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'using downloaded file');
       } else if (streamCacheRef.current[track.id]) {
         streamSource = "cache";
@@ -2264,7 +2266,7 @@ function App() {
         }
 
         // Wrap the YouTube stream URL in our local HTTP server
-        stream = `http://127.0.0.1:${localPort}/play?url=${encodeURIComponent(stream)}`;
+        stream = `http://127.0.0.1:${localPort}/play?url=${encodeURIComponent(stream)}&token=${localToken}`;
         streamCacheRef.current[track.id] = stream;
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'stream URL wrapped in proxy');
 
