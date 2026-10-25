@@ -99,6 +99,18 @@ frontend.
 - El binario sidecar ya no se empaqueta ni se versiona.
 - El CI construye directamente la app Tauri con el motor embebido.
 
+### Verificación de la retirada
+
+- `npx tsc --noEmit` y `npm run build`: correctos.
+- `cargo test` del motor: 6/6; test live contra YouTube: 1/1 (manual).
+- `cargo check` y `npm run tauri build -- --debug --no-bundle`: correctos.
+- Arranque real en modo `--hidden` con el identificador de desarrollo:
+  el proceso no creó ningún hijo `capi-core`; solo aparecieron los procesos
+  de WebKit. El proxy arrancó en el siguiente puerto libre (12762 porque la
+  app instalada antigua ocupaba 12761).
+- La app instalada antigua y su daemon siguen corriendo aparte; no forman
+  parte del build nuevo.
+
 ### Pendiente antes del release
 
 1. QA de runtime con un perfil limpio: búsqueda, play, álbum, playlist, artista,
