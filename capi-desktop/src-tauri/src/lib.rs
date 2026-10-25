@@ -481,15 +481,17 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                                     let content_type = headers.get("content-type")
                                         .and_then(|h| h.to_str().ok())
                                         .unwrap_or("audio/mp4");
-                                    let content_length = headers.get("content-length")
-                                        .and_then(|h| h.to_str().ok())
-                                        .unwrap_or("0");
-                                        
+                                    let upstream_length = headers
+                                        .get("content-length")
+                                        .and_then(|h| h.to_str().ok());
                                     let status_line = format!("HTTP/1.1 {} {}\r\n", status.as_u16(), status.canonical_reason().unwrap_or("OK"));
                                     let mut response_headers = format!(
-                                        "{}Content-Type: {}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n",
-                                        status_line, content_type, content_length
+                                        "{}Content-Type: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n",
+                                        status_line, content_type
                                     );
+                                    if let Some(length) = upstream_length {
+                                        response_headers.push_str(&format!("Content-Length: {}\r\n", length));
+                                    }
                                     
                                     if let Some(range_val) = headers.get("content-range") {
                                         if let Ok(rv) = range_val.to_str() {
@@ -557,28 +559,47 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                                             }
                                         };
                                         
-                                        let mut range_start = 0;
+                                        if file_size == 0 {
+                                            let resp = "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */0\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                                            let _ = stream.write_all(resp.as_bytes());
+                                            return;
+                                        }
+
+                                        let mut range_start = 0u64;
                                         let mut range_end = file_size - 1;
                                         let mut is_partial = false;
-                                        
+
                                         for line in request.lines() {
                                             if line.to_lowercase().starts_with("range:") {
                                                 if let Some(pos) = line.find("bytes=") {
                                                     let range_str = &line[pos + 6..].trim();
                                                     let range_parts: Vec<&str> = range_str.split('-').collect();
                                                     if let Ok(start) = range_parts[0].parse::<u64>() {
+                                                        if start >= file_size {
+                                                            let resp = format!(
+                                                                "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Range: bytes */{}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                                                                file_size
+                                                            );
+                                                            let _ = stream.write_all(resp.as_bytes());
+                                                            return;
+                                                        }
                                                         range_start = start;
                                                         is_partial = true;
                                                     }
                                                     if range_parts.len() > 1 && !range_parts[1].is_empty() {
                                                         if let Ok(end) = range_parts[1].parse::<u64>() {
-                                                            range_end = end;
+                                                            range_end = end.min(file_size - 1);
+                                                            if range_end < range_start {
+                                                                let resp = "HTTP/1.1 416 Range Not Satisfiable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+                                                                let _ = stream.write_all(resp.as_bytes());
+                                                                return;
+                                                            }
                                                         }
                                                     }
                                                 }
                                             }
                                         }
-                                        
+
                                         let content_length = range_end - range_start + 1;
                                         let status_line = if is_partial {
                                             "HTTP/1.1 206 Partial Content\r\n"
@@ -586,8 +607,19 @@ fn start_local_server(capi_dir: PathBuf, app: tauri::AppHandle, media_state: std
                                             "HTTP/1.1 200 OK\r\n"
                                         };
                                         
-                                        let ext = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                                        let mime_type = if ext == "m4a" { "audio/mp4" } else { "audio/webm" };
+                                        let ext = file_path.extension()
+                                            .and_then(|e| e.to_str())
+                                            .unwrap_or("")
+                                            .to_ascii_lowercase();
+                                        let mime_type = match ext.as_str() {
+                                            "m4a" => "audio/mp4",
+                                            "mp3" => "audio/mpeg",
+                                            "wav" => "audio/wav",
+                                            "ogg" => "audio/ogg",
+                                            "flac" => "audio/flac",
+                                            "aac" => "audio/aac",
+                                            _ => "application/octet-stream",
+                                        };
                                         
                                         let mut response_headers = format!(
                                             "{}Content-Type: {}\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nConnection: close\r\nAccess-Control-Allow-Origin: *\r\n",
