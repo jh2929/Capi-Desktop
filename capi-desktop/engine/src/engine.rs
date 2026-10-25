@@ -84,6 +84,16 @@ impl Engine {
         Ok(playlist.tracks.items.iter().map(song_from_track).collect())
     }
 
+    pub async fn search_playlists(&self, query: &str) -> Result<Vec<YtItem>, EngineError> {
+        if query.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let result = self
+            .with_timeout(self.rp.query().music_search_playlists(query, false))
+            .await?;
+        Ok(result.items.items.iter().map(yt_from_playlist).collect())
+    }
+
     pub async fn artist(&self, artist_id: &str) -> Result<ArtistPage, EngineError> {
         let artist = self
             .with_timeout(self.rp.query().music_artist(artist_id, false))
