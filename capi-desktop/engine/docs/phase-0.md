@@ -136,8 +136,10 @@ Verificado con la app real y `curl`:
 | `/play?url=https://example.com/...` con token | 403 (host no permitido) |
 | `/play?url=<googlevideo>&token=…` + Range | **206**, 1 KB |
 | mismo stream sin token | 403 |
-| `/play?path=` dentro de `appdata/Capi` + token | 206 |
+| `/play?path=` dentro de `appdata/Capi` + token | 206, `audio/mpeg` |
 | `/play?path=` fuera de las raíces registradas | 404 |
+| archivo vacío | 416 |
+| `Range` con inicio fuera del archivo | 416 |
 
 ### Pendiente antes del release
 
