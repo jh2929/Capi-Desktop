@@ -6424,7 +6424,7 @@ function App() {
                         <div className="space-y-2 text-xs text-text-secondary">
                           <p><span className="font-semibold text-text-primary">Versión:</span> 1.0.0</p>
                           <p><span className="font-semibold text-text-primary">Desarrollado con:</span> React 19, TypeScript, Tauri 2, Tailwind CSS 4</p>
-                          <p><span className="font-semibold text-text-primary">Motor de audio:</span> capi-core (daemon local)</p>
+                          <p><span className="font-semibold text-text-primary">Motor de audio:</span> capi-engine (Rust, motor embebido)</p>
                           <p><span className="font-semibold text-text-primary">Repositorio:</span> github.com/jh2929/Capi</p>
                         </div>
                       </div>
