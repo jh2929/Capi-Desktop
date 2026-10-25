@@ -26,6 +26,11 @@ struct CachedLyrics {
     cached_at: i64,
 }
 
+struct CachedSearch {
+    songs: Vec<Song>,
+    cached_at: i64,
+}
+
 /// Motor de Capi. Es `Send + Sync` y se comparte como `Arc<Engine>` desde Tauri.
 pub struct Engine {
     rp: RustyPipe,
@@ -34,6 +39,7 @@ pub struct Engine {
     visitor_data: RwLock<Option<String>>,
     streams: RwLock<HashMap<String, CachedStream>>,
     lyrics: RwLock<HashMap<String, CachedLyrics>>,
+    searches: RwLock<HashMap<String, CachedSearch>>,
 }
 
 impl Engine {
@@ -62,19 +68,44 @@ impl Engine {
             visitor_data: RwLock::new(None),
             streams: RwLock::new(HashMap::new()),
             lyrics: RwLock::new(HashMap::new()),
+            searches: RwLock::new(HashMap::new()),
         })
     }
 
     // ─── Catálogo ─────────────────────────────────────────────────────
 
     pub async fn search(&self, query: &str) -> Result<Vec<Song>, EngineError> {
-        if query.trim().is_empty() {
+        let query = query.trim();
+        if query.is_empty() {
             return Ok(Vec::new());
         }
+        let key = query.to_lowercase();
+        if let Some(cached) = self.searches.read().await.get(&key) {
+            if now_unix() - cached.cached_at < 5 * 60 {
+                return Ok(cached.songs.clone());
+            }
+        }
+
         let result = self
             .with_timeout(self.rp.query().music_search_tracks(query))
             .await?;
-        Ok(result.items.items.iter().map(song_from_track).collect())
+        let songs: Vec<Song> = result.items.items.iter().map(song_from_track).collect();
+
+        {
+            let mut cache = self.searches.write().await;
+            if cache.len() >= 64 {
+                cache.clear();
+            }
+            cache.insert(
+                key,
+                CachedSearch {
+                    songs: songs.clone(),
+                    cached_at: now_unix(),
+                },
+            );
+        }
+
+        Ok(songs)
     }
 
     pub async fn album_tracks(&self, album_id: &str) -> Result<Vec<Song>, EngineError> {
@@ -385,7 +416,42 @@ pub(crate) fn best_thumbnail(thumbs: &[Thumbnail]) -> Option<String> {
     thumbs
         .iter()
         .max_by_key(|t| u64::from(t.width) * u64::from(t.height))
-        .map(|t| t.url.clone())
+        .map(|t| upgrade_thumbnail(&t.url))
+}
+
+/// YouTube sirve portadas en varios tamaños mediante la query `=w…-h…`.
+/// Se normaliza a 544 px (el mayor tamaño estable de YT Music) y se cambian
+/// los `*default.jpg` de i.ytimg por `maxresdefault.jpg`.
+fn upgrade_thumbnail(url: &str) -> String {
+    let mut result = url.to_string();
+
+    if url.contains("googleusercontent.com") || url.contains("ggpht.com") {
+        if let Some(eq) = result.rfind('=') {
+            let suffix = result[eq + 1..].to_string();
+            if suffix.starts_with('w') {
+                if let Some(hpos) = suffix.find("-h") {
+                    let width = suffix[1..hpos].parse::<u32>().unwrap_or(544).max(544);
+                    let rest = &suffix[hpos + 2..];
+                    let h_end = rest.find('-').unwrap_or(rest.len());
+                    let height = rest[..h_end].parse::<u32>().unwrap_or(544).max(544);
+                    let tail = &rest[h_end..];
+                    result = format!("{}w{}-h{}{}", &result[..eq + 1], width, height, tail);
+                }
+            } else if suffix.starts_with('s') {
+                let end = suffix.find('-').unwrap_or(suffix.len());
+                let size = suffix[1..end].parse::<u32>().unwrap_or(544).max(544);
+                result = format!("{}=s{}{}", &result[..eq], size, &suffix[end..]);
+            }
+        }
+    }
+
+    if url.contains("ytimg.com") {
+        for size in ["default", "mqdefault", "hqdefault", "sddefault"] {
+            result = result.replace(&format!("/{size}.jpg"), "/maxresdefault.jpg");
+        }
+    }
+
+    result
 }
 
 fn select_visionos_stream(json: &Value) -> Result<StreamInfo, EngineError> {
@@ -485,7 +551,12 @@ pub(crate) fn song_from_track(track: &TrackItem) -> Song {
         artist,
         album: track.album.as_ref().map(|a| a.name.clone()),
         duration: track.duration,
-        thumbnail: best_thumbnail(&track.cover),
+        thumbnail: best_thumbnail(&track.cover).or_else(|| {
+            Some(upgrade_thumbnail(&format!(
+                "https://i.ytimg.com/vi/{}/hqdefault.jpg",
+                track.id
+            )))
+        }),
         explicit: false,
         artist_id,
     }
@@ -593,6 +664,22 @@ mod tests {
         });
         let error = select_visionos_stream(&json).expect_err("debe fallar");
         assert!(error.to_string().contains("LOGIN_REQUIRED"));
+    }
+
+    #[test]
+    fn thumbnails_se_normalizan_a_alta_calidad() {
+        assert_eq!(
+            upgrade_thumbnail("https://yt3.googleusercontent.com/x=w120-h120-l90-rj"),
+            "https://yt3.googleusercontent.com/x=w544-h544-l90-rj"
+        );
+        assert_eq!(
+            upgrade_thumbnail("https://i.ytimg.com/vi/abc/hqdefault.jpg"),
+            "https://i.ytimg.com/vi/abc/maxresdefault.jpg"
+        );
+        assert_eq!(
+            upgrade_thumbnail("https://i.ytimg.com/vi/abc/maxresdefault.jpg"),
+            "https://i.ytimg.com/vi/abc/maxresdefault.jpg"
+        );
     }
 
     #[test]
