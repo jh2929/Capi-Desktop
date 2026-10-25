@@ -92,7 +92,14 @@ frontend.
   Kotlin), sin contar el shell Tauri.
 - El binario Kotlin dejó de empaquetarse (`tauri.conf.json` y `.gitignore`).
 
-### Pendiente antes de borrar Kotlin definitivamente
+### Retirada de Kotlin (completada)
+
+- `capi-core/`, `innertube/`, `lrclib/`, Gradle y los jobs GraalVM fueron
+  eliminados del repositorio.
+- El binario sidecar ya no se empaqueta ni se versiona.
+- El CI construye directamente la app Tauri con el motor embebido.
+
+### Pendiente antes del release
 
 1. QA de runtime con un perfil limpio: búsqueda, play, álbum, playlist, artista,
    letras y descargas.
@@ -100,12 +107,10 @@ frontend.
 3. Sustituir el proxy local por una versión loopback + token y eliminar el
    modo abierto.
 4. Migrar descargas/caché a Rust o dejarlas como están hasta la siguiente fase.
-5. Eliminar `capi-core/`, `innertube/`, `lrclib/`, Gradle y los jobs GraalVM.
 
 ## Siguiente fase
 
 1. QA de runtime y pruebas en las tres plataformas.
-2. Retirar Kotlin/Gradle y actualizar CI.
-3. Endurecer el servidor local y quitar el proxy de imagen/stream abierto.
-4. Descargas atómicas y caché persistente.
+2. Endurecer el servidor local y quitar el proxy de imagen/stream abierto.
+3. Descargas atómicas y caché persistente.
 

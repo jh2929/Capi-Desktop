@@ -12,7 +12,7 @@ sidecar.
   TTL, letras y comandos Tauri con el mismo contrato JSON que el daemon.
 - **Fase 2 (en curso):** QA runtime, Windows/macOS, endurecimiento del proxy
   local y descargas.
-- **Fase 3:** retirada de Kotlin/Gradle y del binario de 61 MB.
+- **Fase 3 (completada):** retirada de Kotlin/Gradle y del binario de 61 MB.
 
 ## Uso
 
