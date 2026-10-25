@@ -8,10 +8,11 @@ sidecar.
 
 - **Fase 0 (completada):** validación de `rustypipe`; el cliente iOS resuelve
   audio AAC/Opus sin PO tokens ni Botguard. Ver [`docs/phase-0.md`](docs/phase-0.md).
-- **Fase 1 (en curso):** API de catálogo (`search`, `album`, `artist`,
-  `playlist`, `home`, `explore`) y resolución de streams con caché TTL.
-- **Fase 2:** letras, integración Tauri y paridad.
-- **Fase 3:** retirada de Kotlin/Gradle.
+- **Fase 1 (completada):** API de catálogo, resolución de streams con caché
+  TTL, letras y comandos Tauri con el mismo contrato JSON que el daemon.
+- **Fase 2 (en curso):** QA runtime, Windows/macOS, endurecimiento del proxy
+  local y descargas.
+- **Fase 3:** retirada de Kotlin/Gradle y del binario de 61 MB.
 
 ## Uso
 

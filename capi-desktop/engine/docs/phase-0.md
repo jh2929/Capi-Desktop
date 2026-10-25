@@ -78,10 +78,34 @@ frontend.
 5. Las URLs de iOS pueden requerir `visitorData` en algunos vídeos; hay que
    probar edad restringida/regiones.
 
+## Fase 0.5 — integración en Tauri (completada)
+
+- `capi-engine` se añadió como path dependency de `src-tauri`.
+- Los comandos `buscar_cancion`, `obtener_stream`, `obtener_playlist`,
+  `obtener_home`, `obtener_artista`, `obtener_explorar`, `obtener_letras`,
+  `obtener_nuevos_lanzamientos` y `obtener_sugerencias` ya usan el motor Rust
+  conservando nombres y forma JSON.
+- Se eliminaron el spawn del daemon, el protocolo stdin/stdout, el timeout de
+  25 s, el reinicio, el watchdog y la ruta hardcodeada del binario.
+- `cargo check` y `cargo build` de la app Tauri pasan.
+- El ejemplo release del motor pesa **8,3 MB** (frente a los 61 MB del binario
+  Kotlin), sin contar el shell Tauri.
+- El binario Kotlin dejó de empaquetarse (`tauri.conf.json` y `.gitignore`).
+
+### Pendiente antes de borrar Kotlin definitivamente
+
+1. QA de runtime con un perfil limpio: búsqueda, play, álbum, playlist, artista,
+   letras y descargas.
+2. Probar Windows y macOS (especialmente M4A/AAC en WebView).
+3. Sustituir el proxy local por una versión loopback + token y eliminar el
+   modo abierto.
+4. Migrar descargas/caché a Rust o dejarlas como están hasta la siguiente fase.
+5. Eliminar `capi-core/`, `innertube/`, `lrclib/`, Gradle y los jobs GraalVM.
+
 ## Siguiente fase
 
-1. Integrar `capi-engine` en Tauri como path dependency.
-2. Reemplazar comandos `buscar_cancion`, `obtener_stream`, etc. manteniendo el
-   JSON actual para no tocar React.
-3. Añadir tests de contrato y pruebas en Windows/macOS.
-4. Retirar el daemon solo cuando la paridad esté verificada.
+1. QA de runtime y pruebas en las tres plataformas.
+2. Retirar Kotlin/Gradle y actualizar CI.
+3. Endurecer el servidor local y quitar el proxy de imagen/stream abierto.
+4. Descargas atómicas y caché persistente.
+
