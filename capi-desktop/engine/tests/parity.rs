@@ -56,6 +56,16 @@ async fn cubre_todos_los_comandos_del_daemon() {
         .expect("range");
     assert_eq!(resp.status(), reqwest::StatusCode::PARTIAL_CONTENT);
 
+    // El cliente iOS limitaba los rangos a ~1 MiB; VISIONOS debe permitir
+    // pedir el segundo bloque sin 403.
+    let second = reqwest::Client::new()
+        .get(&stream.url)
+        .header("Range", "bytes=1048576-2097151")
+        .send()
+        .await
+        .expect("second range");
+    assert_eq!(second.status(), reqwest::StatusCode::PARTIAL_CONTENT);
+
     let home = engine.home().await.expect("home");
     assert!(!home.sections.is_empty());
     assert!(!home.sections[0].items.is_empty());

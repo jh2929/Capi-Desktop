@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rustypipe::client::{ClientType, RustyPipe};
+use rustypipe::client::RustyPipe;
 use rustypipe::model::{AlbumItem, ArtistItem, MusicPlaylistItem, Thumbnail, TrackItem};
+use serde_json::Value;
 use tokio::sync::RwLock;
 
 use crate::error::EngineError;
@@ -14,6 +15,7 @@ use crate::models::{
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(12);
+const VISIONOS_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
 
 struct CachedStream {
     info: StreamInfo,
@@ -27,7 +29,9 @@ struct CachedLyrics {
 /// Motor de Capi. Es `Send + Sync` y se comparte como `Arc<Engine>` desde Tauri.
 pub struct Engine {
     rp: RustyPipe,
+    http: reqwest::Client,
     timeout: Duration,
+    visitor_data: RwLock<Option<String>>,
     streams: RwLock<HashMap<String, CachedStream>>,
     lyrics: RwLock<HashMap<String, CachedLyrics>>,
 }
@@ -45,9 +49,17 @@ impl Engine {
             .n_http_retries(1)
             .build()?;
 
+        let http = reqwest::Client::builder()
+            .user_agent(VISIONOS_USER_AGENT)
+            .timeout(DEFAULT_TIMEOUT)
+            .build()
+            .map_err(|e| EngineError::Internal(format!("no se pudo crear el cliente HTTP: {e}")))?;
+
         Ok(Self {
             rp,
+            http,
             timeout: DEFAULT_TIMEOUT,
+            visitor_data: RwLock::new(None),
             streams: RwLock::new(HashMap::new()),
             lyrics: RwLock::new(HashMap::new()),
         })
@@ -216,9 +228,9 @@ impl Engine {
 
     /// Resuelve una URL de audio reproducible.
     ///
-    /// Fase 0 demostró que el cliente iOS devuelve streams sin PO token y con
-    /// AAC (`itag 140`), que es el formato más compatible con WebView. Se
-    /// prefiere AAC y se cae a Opus si no existe.
+    /// Se usa el cliente **VISIONOS** de YouTube, que no requiere PO token y
+    /// devuelve URLs que aceptan rangos HTTP completos (el cliente IOS limita
+    /// el acceso a ~1 MiB, lo que rompe la reproducción en WebKit/GStreamer).
     pub async fn stream(&self, video_id: &str) -> Result<StreamInfo, EngineError> {
         if let Some(cached) = self.streams.read().await.get(video_id) {
             if cached.info.expires_at > now_unix() + 60 {
@@ -226,34 +238,8 @@ impl Engine {
             }
         }
 
-        let player = self
-            .with_timeout(
-                self.rp
-                    .query()
-                    .player_from_client(video_id, ClientType::Ios),
-            )
-            .await?;
-
-        let stream = player
-            .audio_streams
-            .iter()
-            .filter(|s| s.codec == rustypipe::model::AudioCodec::Mp4a)
-            .max_by_key(|s| s.bitrate)
-            .or_else(|| player.audio_streams.iter().max_by_key(|s| s.bitrate))
-            .ok_or_else(|| {
-                EngineError::Unavailable(format!(
-                    "YouTube no devolvió audio para el vídeo {video_id}"
-                ))
-            })?;
-
-        let info = StreamInfo {
-            url: stream.url.clone(),
-            expires_at: player.valid_until.unix_timestamp(),
-            mime: stream.mime.clone(),
-            bitrate: stream.bitrate,
-            itag: stream.itag,
-            codec: format!("{:?}", stream.codec).to_lowercase(),
-        };
+        let visitor_data = self.visitor_data(false).await?;
+        let info = self.fetch_visionos_stream(video_id, &visitor_data).await?;
 
         self.streams
             .write()
@@ -261,6 +247,69 @@ impl Engine {
             .insert(video_id.to_string(), CachedStream { info: info.clone() });
 
         Ok(info)
+    }
+
+    async fn visitor_data(&self, force_new: bool) -> Result<String, EngineError> {
+        if !force_new {
+            if let Some(cached) = self.visitor_data.read().await.clone() {
+                return Ok(cached);
+            }
+        }
+        let visitor = self
+            .rp
+            .query()
+            .get_visitor_data(force_new)
+            .await
+            .map_err(|e| EngineError::Network(format!("no se pudo obtener visitorData: {e}")))?;
+        *self.visitor_data.write().await = Some(visitor.clone());
+        Ok(visitor)
+    }
+
+    async fn fetch_visionos_stream(
+        &self,
+        video_id: &str,
+        visitor_data: &str,
+    ) -> Result<StreamInfo, EngineError> {
+        let body = serde_json::json!({
+            "context": {
+                "client": {
+                    "clientName": "VISIONOS",
+                    "clientVersion": "1.02",
+                    "deviceMake": "Apple",
+                    "deviceModel": "RealityDevice17,1",
+                    "userAgent": VISIONOS_USER_AGENT,
+                    "osName": "visionOS",
+                    "osVersion": "26.5.23O471",
+                    "hl": "en",
+                    "timeZone": "UTC",
+                    "utcOffsetMinutes": 0
+                }
+            },
+            "videoId": video_id,
+            "contentCheckOk": true,
+            "racyCheckOk": true
+        });
+
+        let response = self
+            .http
+            .post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
+            .header("X-Youtube-Client-Name", "101")
+            .header("X-Youtube-Client-Version", "1.02")
+            .header("X-Goog-Visitor-Id", visitor_data)
+            .header("Origin", "https://www.youtube.com")
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(EngineError::Network(format!(
+                "YouTube player respondió HTTP {}",
+                response.status().as_u16()
+            )));
+        }
+
+        let json: Value = response.json().await?;
+        select_visionos_stream(&json)
     }
 
     pub async fn invalidate_stream(&self, video_id: &str) {
@@ -337,6 +386,81 @@ pub(crate) fn best_thumbnail(thumbs: &[Thumbnail]) -> Option<String> {
         .iter()
         .max_by_key(|t| u64::from(t.width) * u64::from(t.height))
         .map(|t| t.url.clone())
+}
+
+fn select_visionos_stream(json: &Value) -> Result<StreamInfo, EngineError> {
+    let status = json
+        .pointer("/playabilityStatus/status")
+        .and_then(Value::as_str)
+        .unwrap_or("UNKNOWN");
+    if status != "OK" {
+        let reason = json
+            .pointer("/playabilityStatus/reason")
+            .and_then(Value::as_str)
+            .unwrap_or("sin motivo");
+        return Err(EngineError::Unavailable(format!(
+            "YouTube no permite reproducir el vídeo ({status}: {reason})"
+        )));
+    }
+
+    let formats = json
+        .pointer("/streamingData/adaptiveFormats")
+        .and_then(Value::as_array)
+        .ok_or_else(|| EngineError::Unavailable("YouTube no devolvió formatos de audio".into()))?;
+
+    let best = formats
+        .iter()
+        .filter(|format| {
+            format
+                .get("mimeType")
+                .and_then(Value::as_str)
+                .is_some_and(|mime| mime.starts_with("audio/mp4"))
+        })
+        .max_by_key(|format| format.get("bitrate").and_then(Value::as_u64).unwrap_or(0))
+        .or_else(|| {
+            formats.iter().find(|format| {
+                format
+                    .get("mimeType")
+                    .and_then(Value::as_str)
+                    .is_some_and(|mime| mime.starts_with("audio/"))
+            })
+        })
+        .ok_or_else(|| EngineError::Unavailable("no hay pistas de audio disponibles".into()))?;
+
+    let url = best
+        .get("url")
+        .and_then(Value::as_str)
+        .ok_or_else(|| EngineError::Unavailable("YouTube devolvió un formato sin URL".into()))?;
+    let mime = best
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .unwrap_or("audio/mp4")
+        .to_string();
+    let expires_at = url
+        .parse::<reqwest::Url>()
+        .ok()
+        .and_then(|parsed| {
+            parsed
+                .query_pairs()
+                .find(|(key, _)| key == "expire")
+                .and_then(|(_, value)| value.parse::<i64>().ok())
+        })
+        .unwrap_or_else(|| now_unix() + 6 * 60 * 60);
+
+    Ok(StreamInfo {
+        url: url.to_string(),
+        expires_at,
+        bitrate: best.get("bitrate").and_then(Value::as_u64).unwrap_or(0) as u32,
+        itag: best.get("itag").and_then(Value::as_u64).unwrap_or(0) as u32,
+        codec: if mime.contains("mp4") {
+            "mp4a".into()
+        } else if mime.contains("opus") {
+            "opus".into()
+        } else {
+            "unknown".into()
+        },
+        mime,
+    })
 }
 
 pub(crate) fn song_from_track(track: &TrackItem) -> Song {
@@ -443,6 +567,32 @@ mod tests {
     fn engine_es_send_y_sync() {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Engine>();
+    }
+
+    #[test]
+    fn visionos_prefiere_aac_y_lee_la_expiracion() {
+        let json = serde_json::json!({
+            "playabilityStatus": { "status": "OK" },
+            "streamingData": { "adaptiveFormats": [
+                { "itag": 251, "mimeType": "audio/webm; codecs=\"opus\"", "bitrate": 165000,
+                  "url": "https://rr1---sn-x.googlevideo.com/videoplayback?expire=1700000000" },
+                { "itag": 140, "mimeType": "audio/mp4; codecs=\"mp4a.40.2\"", "bitrate": 131000,
+                  "url": "https://rr1---sn-x.googlevideo.com/videoplayback?expire=1800000000" }
+            ]}
+        });
+        let stream = select_visionos_stream(&json).expect("stream");
+        assert_eq!(stream.itag, 140);
+        assert_eq!(stream.codec, "mp4a");
+        assert_eq!(stream.expires_at, 1_800_000_000);
+    }
+
+    #[test]
+    fn visionos_reporta_playability_no_disponible() {
+        let json = serde_json::json!({
+            "playabilityStatus": { "status": "LOGIN_REQUIRED", "reason": "bot" }
+        });
+        let error = select_visionos_stream(&json).expect_err("debe fallar");
+        assert!(error.to_string().contains("LOGIN_REQUIRED"));
     }
 
     #[test]
