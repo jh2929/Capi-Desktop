@@ -14,8 +14,7 @@ dist-ssr/
 src-tauri/target/
 capi-desktop/src-tauri/target/
 capi-desktop/dist/
-capi-desktop/bin/capi-core
-capi-desktop/bin/capi-core.exe
+capi-desktop/bin/*
 
 # OS / IDE files
 .DS_Store
