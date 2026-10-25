@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::process::Command;
 use std::io::Write;
 use tauri::{Manager, Emitter};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -11,13 +10,10 @@ use std::net::TcpListener;
 use std::io::Read;
 use std::fs::File;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use capi_engine::Engine;
 use serde::{Serialize, Deserialize};
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
-
-fn chrono_timestamp() -> String {
-    let dur = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
-    format!("{}.{:03}", dur.as_secs(), dur.subsec_millis())
-}
 
 struct LocalServerState {
     port: u16,
@@ -585,296 +581,22 @@ struct DownloadProgress {
     progress: f64,
 }
 
-fn get_binary_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let binary_name = if cfg!(target_os = "windows") { "capi-core.exe" } else { "capi-core" };
-
-    // 1. Check development/relative and absolute workspace paths first
-    if let Ok(cwd) = std::env::current_dir() {
-        let rel_path1 = cwd.join("bin").join(binary_name);
-        if rel_path1.exists() {
-            return Ok(rel_path1);
-        }
-        let rel_path2 = cwd.join("capi-desktop").join("bin").join(binary_name);
-        if rel_path2.exists() {
-            return Ok(rel_path2);
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let dev_path = std::path::Path::new("/home/emixdy/Proyectos/Capi/capi-desktop/bin/capi-core");
-        if dev_path.exists() {
-            return Ok(dev_path.to_path_buf());
-        }
-    }
-
-    // 2. Check compiled bundle resources
-    if let Ok(dir) = app.path().resource_dir() {
-        let path = dir.join("_up_").join("bin").join(binary_name);
-        if path.exists() {
-            return Ok(path);
-        }
-        let path = dir.join("bin").join(binary_name);
-        if path.exists() {
-            return Ok(path);
-        }
-        let path = dir.join("_up_").join(binary_name);
-        if path.exists() {
-            return Ok(path);
-        }
-        let path_flat = dir.join(binary_name);
-        if path_flat.exists() {
-            return Ok(path_flat);
-        }
-    }
-
-    // 3. Check adjacent to current running binary directory
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(parent) = exe_path.parent() {
-            let path = parent.join("_up_").join("bin").join(binary_name);
-            if path.exists() {
-                return Ok(path);
-            }
-            let path = parent.join("bin").join(binary_name);
-            if path.exists() {
-                return Ok(path);
-            }
-            let path = parent.join("_up_").join(binary_name);
-            if path.exists() {
-                return Ok(path);
-            }
-            let path_flat = parent.join(binary_name);
-            if path_flat.exists() {
-                return Ok(path_flat);
-            }
-        }
-    }
-
-    // 4. Default build fallback (with existence check)
-    if let Ok(dir) = app.path().resource_dir() {
-        let path = dir.join("_up_").join("bin").join(binary_name);
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-
-    Err(format!(
-        "No se encontró el binario del daemon ({binary_name}) en ninguna de las rutas de recursos. \
-         Verifique que esté incluido en el paquete de instalación."
-    ))
-}
-
-use std::process::{ChildStdin, ChildStdout, Stdio};
-use std::io::{BufRead, BufReader};
-use std::sync::Mutex;
-use std::sync::Arc;
-
-struct DaemonProcess {
-    stdin: Mutex<ChildStdin>,
-    stdout: Mutex<BufReader<ChildStdout>>,
-}
-
-async fn send_daemon_command(
-    daemon: Arc<DaemonProcess>,
-    child: Arc<Mutex<std::process::Child>>,
-    command: String,
-) -> Result<String, String> {
-    let timeout_dur = std::time::Duration::from_secs(25);
-    let child_clone = child.clone();
-
-    let result = tokio::time::timeout(
-        timeout_dur,
-        tokio::task::spawn_blocking(move || {
-            let start = std::time::Instant::now();
-            let mut stdin = daemon.stdin.lock().map_err(|e| e.to_string())?;
-            let mut stdout = daemon.stdout.lock().map_err(|e| e.to_string())?;
-            writeln!(stdin, "{}", command).map_err(|e| e.to_string())?;
-            stdin.flush().map_err(|e| e.to_string())?;
-            let mut response = String::new();
-            stdout.read_line(&mut response).map_err(|e| e.to_string())?;
-            println!("[DAEMON] cmd took: {}ms | cmd: {}", start.elapsed().as_millis(), &command[..std::cmp::min(60, command.len())]);
-            Ok::<String, String>(response.trim().to_string())
-        }),
-    ).await;
-
-    match result {
-        Ok(Ok(Ok(resp))) => Ok(resp),
-        Ok(Ok(Err(e))) => {
-            eprintln!("[DAEMON] {} Pipe error (daemon likely dead): {e}", chrono_timestamp());
-            Err("El daemon dejó de responder".to_string())
-        }
-        Ok(Err(join_err)) => Err(format!("Daemon thread error: {}", join_err)),
-        Err(_elapsed) => {
-            let ts = chrono_timestamp();
-            eprintln!("[DAEMON] [{ts}] Command timed out, killing daemon...");
-            if let Ok(mut guard) = child_clone.lock() {
-                let _ = guard.kill();
-                let _ = guard.wait();
-            }
-            Err("El daemon dejó de responder".to_string())
-        }
-    }
-}
-
-fn spawn_daemon_process(binary: &PathBuf) -> Result<(DaemonProcess, std::process::Child), String> {
-    let mut cmd = Command::new(binary);
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-    }
-    cmd.arg("--daemon")
-       .stdin(Stdio::piped())
-       .stdout(Stdio::piped());
-
-    let stderr_buf: Option<Arc<Mutex<String>>>;
-    if cfg!(not(target_os = "linux")) {
-        cmd.stderr(Stdio::piped());
-        stderr_buf = Some(Arc::new(Mutex::new(String::new())));
-    } else {
-        cmd.stderr(Stdio::inherit());
-        stderr_buf = None;
-    }
-
-    let mut child = cmd.spawn()
-        .map_err(|e| format!("Fallo al iniciar capi-core daemon: {}", e))?;
-
-    let stdin = child.stdin.take()
-        .ok_or("No se pudo capturar stdin del daemon".to_string())?;
-    let stdout = child.stdout.take()
-        .ok_or("No se pudo capturar stdout del daemon".to_string())?;
-
-    if let Some(buf) = &stderr_buf {
-        if let Some(stderr) = child.stderr.take() {
-            let buf_clone = buf.clone();
-            std::thread::spawn(move || {
-                let mut reader = BufReader::new(stderr);
-                let mut line = String::new();
-                loop {
-                    line.clear();
-                    match reader.read_line(&mut line) {
-                        Ok(0) => break,
-                        Ok(_) => {
-                            buf_clone.lock().unwrap_or_else(|e| e.into_inner()).push_str(&line);
-                        }
-                        Err(_) => break,
-                    }
-                }
-            });
-        }
-    }
-
-    let mut stdout_reader = BufReader::new(stdout);
-    let mut ready_line = String::new();
-
-    let stderr_msg = |buf: &Option<Arc<Mutex<String>>>| -> String {
-        if cfg!(not(target_os = "linux")) {
-            if let Some(b) = buf {
-                let stderr = b.lock().unwrap_or_else(|e| e.into_inner());
-                if !stderr.is_empty() {
-                    return format!("\nStderr del daemon:\n{}", stderr);
-                }
-            }
-        }
-        String::new()
-    };
-
-    if let Err(e) = stdout_reader.read_line(&mut ready_line) {
-        return Err(format!("Error leyendo respuesta del daemon: {}{}", e, stderr_msg(&stderr_buf)));
-    }
-
-    if !ready_line.contains("ready") {
-        return Err(format!("El daemon no se inicializó correctamente: {}{}", ready_line.trim(), stderr_msg(&stderr_buf)));
-    }
-
-    Ok((DaemonProcess {
-        stdin: Mutex::new(stdin),
-        stdout: Mutex::new(stdout_reader),
-    }, child))
-}
-
-fn restart_daemon(app: &tauri::AppHandle, reason: &str) -> Result<(), String> {
-    // Reap old zombie before spawning new daemon
-    if let Some(old_child) = app.try_state::<Arc<Mutex<std::process::Child>>>() {
-        if let Ok(mut guard) = old_child.inner().lock() {
-            let _ = guard.try_wait();
-        }
-    }
-
-    let binary = get_binary_path(app)?;
-    let (daemon, child) = spawn_daemon_process(&binary)?;
-    app.manage(Arc::new(daemon));
-    app.manage(Arc::new(Mutex::new(child)));
-    let ts = chrono_timestamp();
-    println!("[DAEMON] [{ts}] Restarted successfully (reason: {reason})");
-    let _ = app.emit("daemon-restarted", serde_json::json!({"timestamp": ts, "reason": reason}));
-    let _ = app.emit("daemon-ready", ());
-    Ok(())
+#[tauri::command]
+async fn buscar_cancion(engine: tauri::State<'_, Arc<Engine>>, query: String) -> Result<String, String> {
+    let songs = engine.search(&query).await.map_err(|e| e.to_string())?;
+    serde_json::to_string(&songs).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn buscar_cancion(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<DaemonProcess>>, child: tauri::State<'_, Arc<Mutex<std::process::Child>>>, query: String) -> Result<String, String> {
-    let cmd = serde_json::json!({
-        "action": "search",
-        "query": query
-    }).to_string();
-    let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
-    if let Err(ref e) = result {
-        if e == "El daemon dejó de responder" {
-            restart_daemon(&app, "search_timeout")?;
-            let new_daemon = app.state::<Arc<DaemonProcess>>();
-            let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
-            let cmd2 = serde_json::json!({
-                "action": "search",
-                "query": query
-            }).to_string();
-            return send_daemon_command(new_daemon.inner().clone(), new_child.inner().clone(), cmd2).await;
-        }
-    }
-    result
+async fn obtener_stream(engine: tauri::State<'_, Arc<Engine>>, id: String) -> Result<String, String> {
+    let stream = engine.stream(&id).await.map_err(|e| e.to_string())?;
+    serde_json::to_string(&stream).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn obtener_stream(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<DaemonProcess>>, child: tauri::State<'_, Arc<Mutex<std::process::Child>>>, id: String) -> Result<String, String> {
-    let cmd = serde_json::json!({
-        "action": "get-stream",
-        "id": id
-    }).to_string();
-    let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
-    if let Err(ref e) = result {
-        if e == "El daemon dejó de responder" {
-            restart_daemon(&app, "stream_timeout")?;
-            let new_daemon = app.state::<Arc<DaemonProcess>>();
-            let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
-            let cmd2 = serde_json::json!({
-                "action": "get-stream",
-                "id": id
-            }).to_string();
-            return send_daemon_command(new_daemon.inner().clone(), new_child.inner().clone(), cmd2).await;
-        }
-    }
-    result
-}
-
-#[tauri::command]
-async fn obtener_playlist(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<DaemonProcess>>, child: tauri::State<'_, Arc<Mutex<std::process::Child>>>, id: String) -> Result<String, String> {
-    let cmd = serde_json::json!({
-        "action": "get-playlist",
-        "id": id
-    }).to_string();
-    let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
-    if let Err(ref e) = result {
-        if e == "El daemon dejó de responder" {
-            restart_daemon(&app, "playlist_timeout")?;
-            let new_daemon = app.state::<Arc<DaemonProcess>>();
-            let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
-            let cmd2 = serde_json::json!({
-                "action": "get-playlist",
-                "id": id
-            }).to_string();
-            return send_daemon_command(new_daemon.inner().clone(), new_child.inner().clone(), cmd2).await;
-        }
-    }
-    result
+async fn obtener_playlist(engine: tauri::State<'_, Arc<Engine>>, id: String) -> Result<String, String> {
+    let songs = engine.playlist_tracks(&id).await.map_err(|e| e.to_string())?;
+    serde_json::to_string(&songs).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1035,145 +757,53 @@ async fn borrar_cancion(path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn obtener_home(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<DaemonProcess>>, child: tauri::State<'_, Arc<Mutex<std::process::Child>>>, continuation: Option<String>) -> Result<String, String> {
-    let cmd = serde_json::json!({
-        "action": "home",
-        "continuation": continuation
-    }).to_string();
-    let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
-    if let Err(ref e) = result {
-        if e == "El daemon dejó de responder" {
-            restart_daemon(&app, "home_timeout")?;
-            let new_daemon = app.state::<Arc<DaemonProcess>>();
-            let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
-            let cmd2 = serde_json::json!({
-                "action": "home",
-                "continuation": continuation
-            }).to_string();
-            return send_daemon_command(new_daemon.inner().clone(), new_child.inner().clone(), cmd2).await;
-        }
-    }
-    result
+async fn obtener_home(engine: tauri::State<'_, Arc<Engine>>, continuation: Option<String>) -> Result<String, String> {
+    let _ = continuation;
+    let home = engine.home().await.map_err(|e| e.to_string())?;
+    serde_json::to_string(&home).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn obtener_artista(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<DaemonProcess>>, child: tauri::State<'_, Arc<Mutex<std::process::Child>>>, id: String) -> Result<String, String> {
-    let cmd = serde_json::json!({
-        "action": "artist",
-        "id": id
-    }).to_string();
-    let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
-    if let Err(ref e) = result {
-        if e == "El daemon dejó de responder" {
-            restart_daemon(&app, "artist_timeout")?;
-            let new_daemon = app.state::<Arc<DaemonProcess>>();
-            let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
-            let cmd2 = serde_json::json!({
-                "action": "artist",
-                "id": id
-            }).to_string();
-            return send_daemon_command(new_daemon.inner().clone(), new_child.inner().clone(), cmd2).await;
-        }
-    }
-    result
+async fn obtener_artista(engine: tauri::State<'_, Arc<Engine>>, id: String) -> Result<String, String> {
+    let artist = engine.artist(&id).await.map_err(|e| e.to_string())?;
+    serde_json::to_string(&artist).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn obtener_explorar(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<DaemonProcess>>, child: tauri::State<'_, Arc<Mutex<std::process::Child>>>,) -> Result<String, String> {
-    let cmd = serde_json::json!({
-        "action": "explore"
-    }).to_string();
-    let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
-    if let Err(ref e) = result {
-        if e == "El daemon dejó de responder" {
-            restart_daemon(&app, "explore_timeout")?;
-            let new_daemon = app.state::<Arc<DaemonProcess>>();
-            let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
-            let cmd2 = serde_json::json!({
-                "action": "explore"
-            }).to_string();
-            return send_daemon_command(new_daemon.inner().clone(), new_child.inner().clone(), cmd2).await;
-        }
-    }
-    result
+async fn obtener_explorar(engine: tauri::State<'_, Arc<Engine>>) -> Result<String, String> {
+    let explore = engine.explore().await.map_err(|e| e.to_string())?;
+    serde_json::to_string(&explore).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn obtener_letras(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<DaemonProcess>>, child: tauri::State<'_, Arc<Mutex<std::process::Child>>>, id: String, artist: String, title: String, album: Option<String>, duration: i32, provider: Option<String>) -> Result<String, String> {
-    let cmd = serde_json::json!({
-        "action": "lyrics",
-        "id": id,
-        "artist": artist,
-        "title": title,
-        "album": album,
-        "duration": duration,
-        "provider": provider
-    }).to_string();
-    let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
-    if let Err(ref e) = result {
-        if e == "El daemon dejó de responder" {
-            restart_daemon(&app, "lyrics_timeout")?;
-            let new_daemon = app.state::<Arc<DaemonProcess>>();
-            let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
-            let cmd2 = serde_json::json!({
-                "action": "lyrics",
-                "id": id,
-                "artist": artist,
-                "title": title,
-                "album": album,
-                "duration": duration,
-                "provider": provider
-            }).to_string();
-            return send_daemon_command(new_daemon.inner().clone(), new_child.inner().clone(), cmd2).await;
-        }
-    }
-    result
-}
-
-#[tauri::command]
-async fn obtener_nuevos_lanzamientos(app: tauri::AppHandle, daemon: tauri::State<'_, Arc<DaemonProcess>>, child: tauri::State<'_, Arc<Mutex<std::process::Child>>>) -> Result<String, String> {
-    let cmd = serde_json::json!({
-        "action": "new-releases"
-    }).to_string();
-    let result = send_daemon_command(daemon.inner().clone(), child.inner().clone(), cmd).await;
-    if let Err(ref e) = result {
-        if e == "El daemon dejó de responder" {
-            restart_daemon(&app, "new_releases_timeout")?;
-            let new_daemon = app.state::<Arc<DaemonProcess>>();
-            let new_child = app.state::<Arc<Mutex<std::process::Child>>>();
-            let cmd2 = serde_json::json!({
-                "action": "new-releases"
-            }).to_string();
-            return send_daemon_command(new_daemon.inner().clone(), new_child.inner().clone(), cmd2).await;
-        }
-    }
-    result
-}
-
-#[tauri::command]
-async fn obtener_sugerencias(query: String) -> Result<String, String> {
-    let url = format!(
-        "https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&q={}",
-        urlencoding::encode(&query)
-    );
-    let client = reqwest::Client::new();
-    let res = client
-        .get(&url)
-        .header("User-Agent", "Mozilla/5.0")
-        .send()
+async fn obtener_letras(
+    engine: tauri::State<'_, Arc<Engine>>,
+    id: String,
+    artist: String,
+    title: String,
+    album: Option<String>,
+    duration: i32,
+    provider: Option<String>,
+) -> Result<String, String> {
+    let _ = album;
+    let duration = u32::try_from(duration).unwrap_or(0);
+    let lyrics = engine
+        .lyrics(&id, &artist, &title, duration, provider.as_deref())
         .await
-        .map_err(|e| format!("Error fetching suggestions: {}", e))?;
-    let text = res
-        .text()
-        .await
-        .map_err(|e| format!("Error reading suggestions: {}", e))?;
-    let parsed: serde_json::Value = serde_json::from_str(&text)
-        .map_err(|e| format!("Error parsing suggestions: {}", e))?;
-    if let Some(arr) = parsed.get(1) {
-        Ok(arr.to_string())
-    } else {
-        Ok("[]".to_string())
-    }
+        .map_err(|e| e.to_string())?;
+    serde_json::to_string(&lyrics).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn obtener_nuevos_lanzamientos(engine: tauri::State<'_, Arc<Engine>>) -> Result<String, String> {
+    let releases = engine.new_releases().await.map_err(|e| e.to_string())?;
+    serde_json::to_string(&releases).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn obtener_sugerencias(engine: tauri::State<'_, Arc<Engine>>, query: String) -> Result<String, String> {
+    let suggestions = engine.suggestions(&query).await.map_err(|e| e.to_string())?;
+    serde_json::to_string(&suggestions).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1708,19 +1338,15 @@ async fn transmitir_a_dispositivo(
 }
 
 #[tauri::command]
-fn obtener_info_sistema(
-    app: tauri::AppHandle,
-    child: tauri::State<'_, Arc<Mutex<std::process::Child>>>,
-) -> String {
+fn obtener_info_sistema(app: tauri::AppHandle) -> String {
     let version = app.package_info().version.to_string();
-    let daemon_pid = child.lock().map(|c| c.id()).unwrap_or(0);
     serde_json::json!({
         "app_version": version,
         "os": std::env::consts::OS,
         "arch": std::env::consts::ARCH,
-        "daemon_pid": daemon_pid,
-        "backend": "capi-core (daemon Kotlin)",
-        "backend_version": "no expuesta por el daemon"
+        "daemon_pid": 0,
+        "backend": "capi-engine (Rust)",
+        "backend_version": capi_engine::VERSION
     })
     .to_string()
 }
@@ -2272,12 +1898,6 @@ pub fn run() {
             let handle = app.handle();
 
             if let Err(e) = (|| -> Result<(), String> {
-                let binary = get_binary_path(handle)?;
-                let (daemon_process, child) = spawn_daemon_process(&binary)?;
-
-                app.manage(Arc::new(daemon_process));
-                app.manage(Arc::new(Mutex::new(child)));
-
                 // Start localhost HTTP server for local music playback
                 let app_data = handle.path().app_data_dir()
                     .map_err(|e| format!("No se pudo resolver el directorio de datos: {}", e))?;
@@ -2292,6 +1912,13 @@ pub fn run() {
                     std::fs::create_dir_all(&cache_dir)
                         .map_err(|e| format!("No se pudo crear el directorio de caché: {}", e))?;
                 }
+
+                // Motor Rust: se inicializa sin red ni tokens; el catálogo y
+                // los streams se resuelven bajo demanda.
+                let engine = Engine::new(capi_dir.join("engine"))
+                    .map_err(|e| format!("No se pudo inicializar capi-engine: {e}"))?;
+                app.manage(Arc::new(engine));
+
                 let media_state = Arc::new(Mutex::new(MediaState::default()));
                 let proxy_media_state = media_state.clone();
                 app.manage(media_state);
@@ -2299,39 +1926,6 @@ pub fn run() {
                 let local_port = start_local_server(capi_dir, handle.clone(), proxy_media_state)?;
                 app.manage(LocalServerState { port: local_port });
                 app.manage(DiscordState { client: Mutex::new(None) });
-
-                // ─── Daemon Watchdog ─────────────────────────────────
-                // Uses child.try_wait() to avoid interfering with running commands
-                let watchdog_handle = handle.clone();
-                std::thread::spawn(move || {
-                    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime for watchdog");
-                    rt.block_on(async {
-                        let mut interval = tokio::time::interval(std::time::Duration::from_secs(30));
-                        // Skip first tick so the daemon has time to initialize
-                        interval.tick().await;
-                        loop {
-                            interval.tick().await;
-                            let child = match watchdog_handle.try_state::<Arc<Mutex<std::process::Child>>>() {
-                                Some(s) => s.inner().clone(),
-                                None => continue,
-                            };
-                            let exited = match child.lock() {
-                                Ok(mut guard) => guard.try_wait().unwrap_or(Some(std::process::ExitStatus::default())).is_some(),
-                                Err(_) => true,
-                            };
-                            if exited {
-                                let ts = chrono_timestamp();
-                                eprintln!("[WATCHDOG] [{ts}] Daemon process exited, restarting...");
-                                if let Err(e) = restart_daemon(&watchdog_handle, "process_exited") {
-                                    eprintln!("[WATCHDOG] [{ts}] Failed to restart daemon: {e}");
-                                } else {
-                                    eprintln!("[WATCHDOG] [{ts}] Daemon restarted successfully");
-                                }
-                            }
-                        }
-                    });
-                });
-
                 Ok(())
             })() {
                 #[cfg(not(target_os = "linux"))]
