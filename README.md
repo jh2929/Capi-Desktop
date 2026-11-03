@@ -33,7 +33,7 @@ El desarrollo comenzó con una meta ambiciosa. Gracias a una arquitectura limpia
 | **Consumo de Memoria RAM** | **Muy bajo (<130MB)** | Alto (>300MB) | Alto (pestaña de navegador) | Alto (>250MB) |
 | **Bloqueo Automático de Anuncios** | **Sí (Nativo)** | No (Requiere Premium) | No (Requiere Premium) | No (Requiere Premium) |
 | **Descarga Física Directa (M4A)** | **Sí (Gratuito/Nativo)** | Solo Caché Encriptado | Solo Móvil / Encriptado | Solo Encriptado |
-| **Bypass de Restricciones (PO-Tokens)** | **Sí (Integrado/Automático)** | N/A | No | N/A |
+| **Bypass de Restricciones (InnerTube)** | **Sí (Multi-cliente Nativo)** | N/A | No | N/A |
 | **Temas Visuales Ilimitados** | **Sí (Ultra Dark, Midnight, etc.)** | No | No (Solo Oscuro) | Limitado |
 | **Letras Sincronizadas en Tiempo Real** | **Sí (Integración LrcLib)** | Sí | Sí | Sí |
 | **Comunidad y Código Abierto** | **Sí (GPL-3.0)** | No (Propietario) | No (Propietario) | No (Propietario) |

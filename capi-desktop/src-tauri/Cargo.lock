@@ -484,7 +484,7 @@ dependencies = [
 
 [[package]]
 name = "capi-desktop"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "capi-engine",
  "discord-rich-presence",
@@ -507,7 +507,7 @@ dependencies = [
 
 [[package]]
 name = "capi-engine"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "reqwest 0.12.28",
  "rustypipe",

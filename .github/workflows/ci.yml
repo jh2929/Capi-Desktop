@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Lint, Typecheck & Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: capi-desktop/package-lock.json
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            capi-desktop/src-tauri -> target
+            capi-desktop/engine -> target
+
+      - name: Install system dependencies (Linux)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libsoup-3.0-dev
+
+      - name: Install npm dependencies
+        run: npm ci
+        working-directory: capi-desktop
+
+      - name: Frontend typecheck
+        run: npx tsc --noEmit
+        working-directory: capi-desktop
+
+      - name: Rust format check
+        run: |
+          cargo fmt --manifest-path capi-desktop/engine/Cargo.toml --check
+          cargo fmt --manifest-path capi-desktop/src-tauri/Cargo.toml --check
+
+      - name: Rust clippy
+        run: |
+          cargo clippy --manifest-path capi-desktop/engine/Cargo.toml -- -D warnings
+          cargo clippy --manifest-path capi-desktop/src-tauri/Cargo.toml
+
+      - name: Rust tests
+        run: |
+          cargo test --manifest-path capi-desktop/engine/Cargo.toml
+          cargo test --manifest-path capi-desktop/src-tauri/Cargo.toml

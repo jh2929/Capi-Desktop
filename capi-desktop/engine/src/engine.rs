@@ -16,6 +16,12 @@ use crate::models::{
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(12);
 const VISIONOS_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15";
+const ANDROID_USER_AGENT: &str = "Mozilla/5.0 (Linux; Android 12; Quest 3) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.5481.153 Mobile Safari/537.36";
+const TV_USER_AGENT: &str = "Mozilla/5.0 (Web0S; Linux/SmartTV) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.5735.196 Safari/537.36";
+
+const MAX_CACHED_STREAMS: usize = 100;
+const MAX_CACHED_LYRICS: usize = 150;
+const MAX_CACHED_SEARCHES: usize = 50;
 
 struct CachedStream {
     info: StreamInfo,
@@ -93,14 +99,19 @@ impl Engine {
 
         {
             let mut cache = self.searches.write().await;
-            if cache.len() >= 64 {
-                cache.clear();
+            let now = now_unix();
+            cache.retain(|_, v| v.cached_at + 1800 > now);
+            if cache.len() >= MAX_CACHED_SEARCHES {
+                let to_remove: Vec<String> = cache.keys().take(15).cloned().collect();
+                for k in to_remove {
+                    cache.remove(&k);
+                }
             }
             cache.insert(
                 key,
                 CachedSearch {
                     songs: songs.clone(),
-                    cached_at: now_unix(),
+                    cached_at: now,
                 },
             );
         }
@@ -259,9 +270,9 @@ impl Engine {
 
     /// Resuelve una URL de audio reproducible.
     ///
-    /// Se usa el cliente **VISIONOS** de YouTube, que no requiere PO token y
-    /// devuelve URLs que aceptan rangos HTTP completos (el cliente IOS limita
-    /// el acceso a ~1 MiB, lo que rompe la reproducción en WebKit/GStreamer).
+    /// Se intenta primero con el cliente **VISIONOS** de YouTube; si falla o YouTube
+    /// introduce cambios, se recurre automáticamente a los clientes fallback
+    /// **ANDROID_VR** y **TVHTML5_SIMPLY_EMBEDDED**.
     pub async fn stream(&self, video_id: &str) -> Result<StreamInfo, EngineError> {
         if let Some(cached) = self.streams.read().await.get(video_id) {
             if cached.info.expires_at > now_unix() + 60 {
@@ -270,12 +281,37 @@ impl Engine {
         }
 
         let visitor_data = self.visitor_data(false).await?;
-        let info = self.fetch_visionos_stream(video_id, &visitor_data).await?;
 
-        self.streams
-            .write()
-            .await
-            .insert(video_id.to_string(), CachedStream { info: info.clone() });
+        let info =
+            match self.fetch_visionos_stream(video_id, &visitor_data).await {
+                Ok(info) => info,
+                Err(err_visionos) => {
+                    match self.fetch_android_vr_stream(video_id, &visitor_data).await {
+                    Ok(info) => info,
+                    Err(err_vr) => {
+                        self.fetch_tv_embedded_stream(video_id, &visitor_data).await
+                            .map_err(|err_tv| {
+                                EngineError::Unavailable(format!(
+                                    "No se pudo resolver el stream de audio ({video_id}). VISIONOS: {err_visionos}; ANDROID_VR: {err_vr}; TV: {err_tv}"
+                                ))
+                            })?
+                    }
+                }
+                }
+            };
+
+        {
+            let mut streams = self.streams.write().await;
+            let now = now_unix();
+            streams.retain(|_, v| v.info.expires_at > now);
+            if streams.len() >= MAX_CACHED_STREAMS {
+                let to_remove: Vec<String> = streams.keys().take(20).cloned().collect();
+                for k in to_remove {
+                    streams.remove(&k);
+                }
+            }
+            streams.insert(video_id.to_string(), CachedStream { info: info.clone() });
+        }
 
         Ok(info)
     }
@@ -343,6 +379,99 @@ impl Engine {
         select_visionos_stream(&json)
     }
 
+    async fn fetch_android_vr_stream(
+        &self,
+        video_id: &str,
+        visitor_data: &str,
+    ) -> Result<StreamInfo, EngineError> {
+        let body = serde_json::json!({
+            "context": {
+                "client": {
+                    "clientName": "ANDROID_VR",
+                    "clientVersion": "1.61.48",
+                    "deviceMake": "Oculus",
+                    "deviceModel": "Quest 3",
+                    "userAgent": ANDROID_USER_AGENT,
+                    "osName": "Android",
+                    "osVersion": "12",
+                    "hl": "en",
+                    "timeZone": "UTC",
+                    "utcOffsetMinutes": 0
+                }
+            },
+            "videoId": video_id,
+            "contentCheckOk": true,
+            "racyCheckOk": true
+        });
+
+        let response = self
+            .http
+            .post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
+            .header("X-Youtube-Client-Name", "28")
+            .header("X-Youtube-Client-Version", "1.61.48")
+            .header("X-Goog-Visitor-Id", visitor_data)
+            .header("Origin", "https://www.youtube.com")
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(EngineError::Network(format!(
+                "YouTube player (ANDROID_VR) respondió HTTP {}",
+                response.status().as_u16()
+            )));
+        }
+
+        let json: Value = response.json().await?;
+        select_visionos_stream(&json)
+    }
+
+    async fn fetch_tv_embedded_stream(
+        &self,
+        video_id: &str,
+        visitor_data: &str,
+    ) -> Result<StreamInfo, EngineError> {
+        let body = serde_json::json!({
+            "context": {
+                "client": {
+                    "clientName": "TVHTML5_SIMPLY_EMBEDDED",
+                    "clientVersion": "2.0",
+                    "userAgent": TV_USER_AGENT,
+                    "hl": "en",
+                    "timeZone": "UTC",
+                    "utcOffsetMinutes": 0
+                },
+                "thirdParty": {
+                    "embedUrl": "https://www.youtube.com"
+                }
+            },
+            "videoId": video_id,
+            "contentCheckOk": true,
+            "racyCheckOk": true
+        });
+
+        let response = self
+            .http
+            .post("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
+            .header("X-Youtube-Client-Name", "85")
+            .header("X-Youtube-Client-Version", "2.0")
+            .header("X-Goog-Visitor-Id", visitor_data)
+            .header("Origin", "https://www.youtube.com")
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(EngineError::Network(format!(
+                "YouTube player (TV) respondió HTTP {}",
+                response.status().as_u16()
+            )));
+        }
+
+        let json: Value = response.json().await?;
+        select_visionos_stream(&json)
+    }
+
     pub async fn invalidate_stream(&self, video_id: &str) {
         self.streams.write().await.remove(video_id);
     }
@@ -374,13 +503,24 @@ impl Engine {
         )
         .await?;
 
-        self.lyrics.write().await.insert(
-            video_id.to_string(),
-            CachedLyrics {
-                result: result.clone(),
-                cached_at: now_unix(),
-            },
-        );
+        {
+            let mut lyrics_cache = self.lyrics.write().await;
+            let now = now_unix();
+            lyrics_cache.retain(|_, v| v.cached_at + 86400 > now);
+            if lyrics_cache.len() >= MAX_CACHED_LYRICS {
+                let to_remove: Vec<String> = lyrics_cache.keys().take(30).cloned().collect();
+                for k in to_remove {
+                    lyrics_cache.remove(&k);
+                }
+            }
+            lyrics_cache.insert(
+                video_id.to_string(),
+                CachedLyrics {
+                    result: result.clone(),
+                    cached_at: now,
+                },
+            );
+        }
 
         Ok(result)
     }
@@ -472,6 +612,10 @@ fn select_visionos_stream(json: &Value) -> Result<StreamInfo, EngineError> {
     let formats = json
         .pointer("/streamingData/adaptiveFormats")
         .and_then(Value::as_array)
+        .or_else(|| {
+            json.pointer("/streamingData/formats")
+                .and_then(Value::as_array)
+        })
         .ok_or_else(|| EngineError::Unavailable("YouTube no devolvió formatos de audio".into()))?;
 
     let best = formats

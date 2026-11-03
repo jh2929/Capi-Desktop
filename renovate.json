@@ -16,16 +16,6 @@
       "respectLatest": true
     },
     {
-      "matchManagers": [
-        "gradle"
-      ],
-      "enabled": false,
-      "matchPackageNames": [
-        "/^com\\.github\\.teamnewpipe:NewPipeExtractor$/",
-        "/^org\\.jetbrains\\.kotlin:kotlin\\-gradle\\-plugin$/"
-      ]
-    },
-    {
       "description": "Ignore all pre-release versions (alpha, beta, rc, dev, snapshot)",
       "matchPackageNames": ["*"],
       "allowedVersions": "!/-(alpha|beta|rc|dev|snapshot|SNAPSHOT|Alpha|Beta|RC|Dev)/i"

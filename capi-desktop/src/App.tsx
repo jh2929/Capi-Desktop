@@ -38,6 +38,68 @@ const CastIcon = ({ className = "w-4 h-4" }: { className?: string }) => (
   </svg>
 );
 
+function safeJsonParse<T>(raw: string | null | undefined, fallback: T): T {
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(raw) as T;
+  } catch (err) {
+    console.warn("[Storage] Fallo al parsear JSON, usando fallback:", err);
+    return fallback;
+  }
+}
+
+function safeSetItem(key: string, value: string, onError?: (err: any) => void): boolean {
+  try {
+    localStorage.setItem(key, value);
+    return true;
+  } catch (err: any) {
+    console.error(`[Storage] Error al guardar "${key}":`, err);
+    if (onError) onError(err);
+    return false;
+  }
+}
+
+async function resizeImageBase64(file: File, maxDim = 512, quality = 0.8): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const img = new Image();
+      img.onload = () => {
+        let width = img.width;
+        let height = img.height;
+        if (width > maxDim || height > maxDim) {
+          if (width > height) {
+            height = Math.round((height * maxDim) / width);
+            width = maxDim;
+          } else {
+            width = Math.round((width * maxDim) / height);
+            height = maxDim;
+          }
+        }
+        const canvas = document.createElement("canvas");
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+          resolve(e.target?.result as string);
+          return;
+        }
+        ctx.drawImage(img, 0, 0, width, height);
+        resolve(canvas.toDataURL("image/jpeg", quality));
+      };
+      img.onerror = () => resolve(e.target?.result as string);
+      img.src = e.target?.result as string;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+interface CachedStream {
+  url: string;
+  expiresAt: number;
+}
+
 interface NavState {
   tab: "home" | "explore" | "buscar" | "biblioteca" | "playlists" | "favoritos" | "artist" | "album_view" | "settings" | "perfil" | "lanzamientos" | "download_manager" | "stats";
   artistId?: string;
@@ -146,6 +208,7 @@ const HOME_FALLBACK_QUERIES = [
 ];
 
 export const ACCENT_COLORS = [
+  { id: "white", name: "Blanco", dark: "#ffffff", darkSec: "#e5e5e5", darkTert: "#a3a3a3", light: "#18181b", lightSec: "#27272a", lightTert: "#52525b" },
   { id: "purple", name: "Púrpura", dark: "#d0bcff", darkSec: "#ccc2dc", darkTert: "#efb8c8", light: "#7c3aed", lightSec: "#8b5cf6", lightTert: "#a78bfa" },
   { id: "blue", name: "Azul", dark: "#38bdf8", darkSec: "#7dd3fc", darkTert: "#0ea5e9", light: "#0284c7", lightSec: "#0ea5e9", lightTert: "#38bdf8" },
   { id: "green", name: "Verde", dark: "#34d399", darkSec: "#6ee7b7", darkTert: "#059669", light: "#059669", lightSec: "#10b981", lightTert: "#34d399" },
@@ -342,10 +405,10 @@ function App() {
   const [contextMenuArtist, setContextMenuArtist] = useState<ArtistAffinity | null>(null);
   const [hiddenArtists, setHiddenArtists] = useState<string[]>(() => {
     const saved = localStorage.getItem("capi_hidden_artists");
-    return saved ? JSON.parse(saved) : [];
+    return safeJsonParse<string[]>(saved, []);
   });
   const [showThemeDropdown, setShowThemeDropdown] = useState(false);
-  const [accentColor, setAccentColor] = useState<string>(() => localStorage.getItem("capi_accent_color") || "purple");
+  const [accentColor, setAccentColor] = useState<string>(() => localStorage.getItem("capi_accent_color") || "white");
   const [showAccentDropdown, setShowAccentDropdown] = useState(false);
   const [accentSearchQuery, setAccentSearchQuery] = useState("");
   const colorInputRef = useRef<HTMLInputElement | null>(null);
@@ -410,7 +473,9 @@ function App() {
   const [importPlaylistUrl, setImportPlaylistUrl] = useState("");
   const [errorModal, setErrorModal] = useState<{ message: string } | null>(null);
   const [diagnosticReport, setDiagnosticReport] = useState<DiagnosticReport | null>(null);
-  const streamCacheRef = useRef<Record<string, string>>({});
+  const streamCacheRef = useRef<Record<string, CachedStream>>({});
+  const playReqIdRef = useRef<number>(0);
+  const searchReqIdRef = useRef<number>(0);
   // const playCountCacheRef = useRef<Record<string, number>>({});
   const nextRandomIndexRef = useRef<number | null>(null);
   
@@ -423,7 +488,7 @@ function App() {
   const migrateKey = (oldKey: string, newKey: string) => {
     const oldVal = localStorage.getItem(oldKey);
     if (oldVal) {
-      localStorage.setItem(newKey, oldVal);
+      safeSetItem(newKey, oldVal);
       localStorage.removeItem(oldKey);
       return oldVal;
     }
@@ -433,39 +498,39 @@ function App() {
   const [favorites, setFavorites] = useState<Track[]>(() => {
     migrateKey("opentune_favorites", "capi_favorites");
     const saved = localStorage.getItem("capi_favorites");
-    return saved ? JSON.parse(saved) : [];
+    return safeJsonParse<Track[]>(saved, []);
   });
   const [playlists, setPlaylists] = useState<Playlist[]>(() => {
     migrateKey("opentune_playlists", "capi_playlists");
     const saved = localStorage.getItem("capi_playlists");
-    return saved ? JSON.parse(saved) : [];
+    return safeJsonParse<Playlist[]>(saved, []);
   });
   const [history, setHistory] = useState<Track[]>(() => {
     migrateKey("opentune_history", "capi_history");
     const saved = localStorage.getItem("capi_history");
-    return saved ? JSON.parse(saved) : [];
+    return safeJsonParse<Track[]>(saved, []);
   });
   const [downloads, setDownloads] = useState<Record<string, string>>(() => {
     migrateKey("opentune_downloads", "capi_downloads");
     const saved = localStorage.getItem("capi_downloads");
     if (!saved) return {};
-    const parsed: Record<string, string> = JSON.parse(saved);
+    const parsed = safeJsonParse<Record<string, string>>(saved, {});
     // Migrate old paths from Opentune/ to Capi/
     for (const key of Object.keys(parsed)) {
       parsed[key] = parsed[key].replace("/Opentune/", "/Capi/");
     }
-    localStorage.setItem("capi_downloads", JSON.stringify(parsed));
+    safeSetItem("capi_downloads", JSON.stringify(parsed));
     return parsed;
   });
   const [downloadedMetadata, setDownloadedMetadata] = useState<Track[]>(() => {
     migrateKey("opentune_downloaded_metadata", "capi_downloaded_metadata");
     const saved = localStorage.getItem("capi_downloaded_metadata");
-    return saved ? JSON.parse(saved) : [];
+    return safeJsonParse<Track[]>(saved, []);
   });
   
   // Library views
   const getPlaylistCover = (playlist: Playlist): string => {
-    const stored = JSON.parse(localStorage.getItem("capi_playlist_covers") || "{}");
+    const stored = safeJsonParse<Record<string, string>>(localStorage.getItem("capi_playlist_covers"), {});
     return stored[playlist.id] || playlist.tracks?.[0]?.thumbnail || "";
   };
   const [libTab, setLibTab] = useState<"home" | "downloads" | "history" | "local">("home");
@@ -678,7 +743,7 @@ function App() {
     dailyMinutes: Record<string, number>;
   }>(() => {
     const saved = localStorage.getItem("capi_listening_stats");
-    return saved ? JSON.parse(saved) : { totalMinutes: 0, trackPlays: {}, artistMinutes: {}, dailyMinutes: {} };
+    return safeJsonParse(saved, { totalMinutes: 0, trackPlays: {}, artistMinutes: {}, dailyMinutes: {} });
   });
   const statsTrackingRef = useRef<{ trackId: string | null; startTime: number | null; counted: boolean }>({ trackId: null, startTime: null, counted: false });
 
@@ -1219,27 +1284,33 @@ function App() {
     const nextTrack = getNextTrackToPlay();
     // Skip preload for playlist/radio IDs - they need playlist resolution first
     const isPlaylistId = nextTrack && (nextTrack.id.startsWith('RDCLAK') || nextTrack.id.startsWith('OLAK') || nextTrack.id.startsWith('PL') || nextTrack.id.startsWith('MPREb') || nextTrack.id.startsWith('local://'));
-    if (nextTrack && !isPlaylistId && !downloads[nextTrack.id] && !streamCacheRef.current[nextTrack.id]) {
+    const nowUnix = Math.floor(Date.now() / 1000);
+    const cached = nextTrack ? streamCacheRef.current[nextTrack.id] : null;
+    const isCachedValid = cached && cached.expiresAt > nowUnix + 60 && !cached.url.includes(":null/");
+    if (nextTrack && !isPlaylistId && !downloads[nextTrack.id] && !isCachedValid) {
       invoke<string>("obtener_stream", { id: nextTrack.id }).then(resultJson => {
         let stream = resultJson;
+        let expiresAt = Math.floor(Date.now() / 1000) + 18000;
         try {
           const parsed = JSON.parse(resultJson);
           if (parsed.error) return; // Don't cache errors
           if (parsed.streamUrl) stream = parsed.streamUrl;
           else if (parsed.url) stream = parsed.url;
+          if (parsed.expiresAt) expiresAt = parsed.expiresAt;
         } catch {}
         if (stream.startsWith('"') && stream.endsWith('"')) {
           stream = stream.substring(1, stream.length - 1);
         }
+        if (!localPort || !localToken) return;
         // Wrap in proxy for consistency
-        stream = `http://127.0.0.1:${localPort}/play?url=${encodeURIComponent(stream)}&token=${localToken}`;
-        streamCacheRef.current[nextTrack.id] = stream;
+        stream = `http://127.0.0.1:${localPort}/play.m4a?url=${encodeURIComponent(stream)}&token=${localToken}`;
+        streamCacheRef.current[nextTrack.id] = { url: stream, expiresAt };
         console.log(`[PRELOAD] Preloaded next track: ${nextTrack.title}`);
       }).catch(err => {
         console.error("[PRELOAD] Failed preloading track stream:", err);
       });
     }
-  }, [currentTrack?.id, activeQueue, isShuffle, getNextTrackToPlay, downloads]);
+  }, [currentTrack?.id, activeQueue, isShuffle, getNextTrackToPlay, downloads, localPort, localToken]);
 
   // Load Homepage dynamic recommendations
   useEffect(() => { fetchHomeData(); }, []);
@@ -2118,6 +2189,7 @@ function App() {
   }, [currentTrack?.id]);
 
   const playTrack = async (track: Track, queueList: Track[] = []) => {
+    const reqId = ++playReqIdRef.current;
     // Immediately stop current playback before doing anything else
     if (audioRef.current) {
       audioRef.current.pause();
@@ -2129,8 +2201,6 @@ function App() {
     setCurrentTime(0);
     setDuration(0);
     setBuffering(false);
-    // Track play count for cache threshold — DISABLED
-    // playCountCacheRef.current[track.id] = (playCountCacheRef.current[track.id] || 0) + 1;
 
     // Señal al sistema de diagnóstico: nueva solicitud de reproducción
     diagnostics.onPlaybackRequested(track);
@@ -2155,7 +2225,8 @@ function App() {
         diagnostics.onPlaylistResolveStarted();
         try {
           const playlistJson = await invoke<string>("obtener_playlist", { id: track.id });
-          const songs: Track[] = JSON.parse(playlistJson);
+          if (reqId !== playReqIdRef.current) return;
+          const songs: Track[] = safeJsonParse(playlistJson, []);
           if (songs.length > 0) {
             console.log(`[PLAY] Resolved ${songs.length} songs from playlist, playing first: ${songs[0].title}`);
             setLoading(false);
@@ -2166,6 +2237,7 @@ function App() {
             throw new Error("Playlist vacía");
           }
         } catch (err: any) {
+          if (reqId !== playReqIdRef.current) return;
           console.error("[PLAY] Failed to resolve playlist:", err);
           diagnostics.onPlaylistResolveFailed(err);
           diagnostics.onPlaybackFailed(track, err);
@@ -2177,7 +2249,13 @@ function App() {
       }
 
       console.time(`[PLAY-TIMING] ${track.title}`);
-      const isCachedOrLocal = !!(downloads[track.id] || streamCacheRef.current[track.id]);
+      const nowUnix = Math.floor(Date.now() / 1000);
+      const cachedEntry = streamCacheRef.current[track.id];
+      const isCachedValid = !!(cachedEntry && cachedEntry.expiresAt > nowUnix + 60 && !cachedEntry.url.includes(":null/"));
+      if (cachedEntry && !isCachedValid) {
+        delete streamCacheRef.current[track.id];
+      }
+      const isCachedOrLocal = !!(downloads[track.id] || isCachedValid);
       if (!isCachedOrLocal) {
         setLoading(true);
         setBuffering(true);
@@ -2202,6 +2280,20 @@ function App() {
 
       recordPlayEvent(track, 0).catch(err => console.error("recordPlayEvent failed:", err));
       
+      let activePort = localPort;
+      let activeToken = localToken;
+      if (!activePort || !activeToken) {
+        try {
+          const info = await invoke<{ port: number; token: string }>("obtener_local_port");
+          activePort = info.port;
+          activeToken = info.token;
+          setLocalPort(info.port);
+          setLocalToken(info.token);
+        } catch (e) {
+          console.error("[PLAY] Error obteniendo localPort:", e);
+        }
+      }
+
       let stream: string;
       let streamSource: "local" | "download" | "cache" | "backend" = "backend";
       const resolveStart = performance.now();
@@ -2209,18 +2301,18 @@ function App() {
         streamSource = "local";
         diagnostics.onStreamResolveStarted(streamSource);
         const path = track.id.replace("local://", "");
-        stream = `http://127.0.0.1:${localPort}/play?path=${encodeURIComponent(path)}&token=${localToken}`;
+        stream = `http://127.0.0.1:${activePort}/play?path=${encodeURIComponent(path)}&token=${activeToken}`;
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'using local custom folder file');
       } else if (downloads[track.id]) {
         streamSource = "download";
         diagnostics.onStreamResolveStarted(streamSource);
         const path = downloads[track.id];
-        stream = `http://127.0.0.1:${localPort}/play?path=${encodeURIComponent(path)}&token=${localToken}`;
+        stream = `http://127.0.0.1:${activePort}/play?path=${encodeURIComponent(path)}&token=${activeToken}`;
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'using downloaded file');
-      } else if (streamCacheRef.current[track.id]) {
+      } else if (isCachedValid && cachedEntry) {
         streamSource = "cache";
         diagnostics.onStreamResolveStarted(streamSource);
-        stream = streamCacheRef.current[track.id];
+        stream = cachedEntry.url;
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'using cached stream URL');
       } else {
         streamSource = "backend";
@@ -2244,9 +2336,11 @@ function App() {
           }
           break;
         }
+        if (reqId !== playReqIdRef.current) return;
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'obtener_stream returned');
         stream = resultJson!;
         let parsedError: Error | null = null;
+        let expiresAt = Math.floor(Date.now() / 1000) + 18000;
         try {
           const parsed = JSON.parse(resultJson!);
           if (parsed.error) {
@@ -2254,6 +2348,7 @@ function App() {
           }
           if (parsed.streamUrl) stream = parsed.streamUrl;
           else if (parsed.url) stream = parsed.url;
+          if (parsed.expiresAt) expiresAt = parsed.expiresAt;
         } catch (err: any) {
           if (err.message && !err.message.includes("Unexpected token")) {
             parsedError = err;
@@ -2268,21 +2363,11 @@ function App() {
         }
 
         // Wrap the YouTube stream URL in our local HTTP server
-        stream = `http://127.0.0.1:${localPort}/play?url=${encodeURIComponent(stream)}&token=${localToken}`;
-        streamCacheRef.current[track.id] = stream;
+        stream = `http://127.0.0.1:${activePort}/play.m4a?url=${encodeURIComponent(stream)}&token=${activeToken}`;
+        if (activePort && activeToken) {
+          streamCacheRef.current[track.id] = { url: stream, expiresAt };
+        }
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'stream URL wrapped in proxy');
-
-        // Cache after 2+ plays (fire-and-forget, never blocks playback) — DISABLED
-        // if (playCountCacheRef.current[track.id] >= 2) {
-        //   setCacheDownloadsProgress(prev => ({ ...prev, [track.id]: 0 }));
-        //   invoke("cache_audio", { trackId: track.id, url: originalStreamUrl, title: track.title, artist: track.artist, thumbnail: track.thumbnail })
-        //     .then(() => setCacheDownloadsProgress(prev => ({ ...prev, [track.id]: 100 })))
-        //     .catch(() => setCacheDownloadsProgress(prev => {
-        //       const copy = { ...prev };
-        //       delete copy[track.id];
-        //       return copy;
-        //     }));
-        // }
       }
 
       // Validar la URL final del stream y registrarla en el diagnóstico
@@ -2292,6 +2377,7 @@ function App() {
         throw new Error(validation.summary);
       }
 
+      if (reqId !== playReqIdRef.current) return;
       setStreamUrl(stream);
       console.timeLog(`[PLAY-TIMING] ${track.title}`, 'setting audio.src...');
       
@@ -2301,6 +2387,7 @@ function App() {
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'calling audio.play()...');
         diagnostics.onPlayerPlayCalled();
         audioRef.current.play().then(() => {
+          if (reqId !== playReqIdRef.current) return;
           console.timeEnd(`[PLAY-TIMING] ${track.title}`);
           console.log(`[PLAY-TIMING] ✅ Playback started for: ${track.title}`);
           setIsPlaying(true);
@@ -2316,6 +2403,8 @@ function App() {
             listenedAccumRef.current.ms += 10000;
           }, 10000);
         }).catch(err => {
+          if (err?.name === "AbortError") return;
+          if (reqId !== playReqIdRef.current) return;
           console.timeEnd(`[PLAY-TIMING] ${track.title}`);
           console.error("Playback error:", err, "for stream:", stream);
           diagnostics.onPlaybackFailed(track, err);
@@ -2325,6 +2414,7 @@ function App() {
         });
       }
     } catch (error) {
+      if (reqId !== playReqIdRef.current) return;
       console.error("Stream acquisition failed:", error);
       diagnostics.onPlaybackFailed(track, error);
       const report = diagnostics.buildReport();
@@ -2462,12 +2552,14 @@ function App() {
 
   const performSearchWithQuery = async (searchQuery: string) => {
     if (!searchQuery.trim()) return;
+    const reqId = ++searchReqIdRef.current;
     navigateTo("buscar");
     setLoading(true);
     setShowSearchDropdown(false);
     try {
       const responseJson = await invoke<string>("buscar_cancion", { query: searchQuery });
-      const data = JSON.parse(responseJson);
+      if (reqId !== searchReqIdRef.current) return;
+      const data = safeJsonParse<any>(responseJson, null);
 
       if (data && !Array.isArray(data) && data.error) {
         console.error("Backend search error:", data.error);
@@ -2476,7 +2568,7 @@ function App() {
         return;
       }
       
-      let parsedTracks: Track[] = (Array.isArray(data) ? data : data.tracks || data.results || []).map((t: any) => ({
+      let parsedTracks: Track[] = (Array.isArray(data) ? data : data?.tracks || data?.results || []).map((t: any) => ({
         id: t.id, title: t.title, artist: (t.artist && t.artist !== "YT Music") ? t.artist : "Artista Desconocido",
         album: t.album || "", duration: t.duration || 0,
         thumbnail: t.thumbnail || "https://images.unsplash.com/photo-1614680376593-902f74fa0d41?q=80&w=300",
@@ -2501,9 +2593,13 @@ function App() {
         setSearchThumbnails(prev => ({ ...prev, [searchQuery.trim()]: parsedTracks[0].thumbnail }));
       }
     } catch (error: any) {
-      console.error("Search error:", error);
+      if (reqId === searchReqIdRef.current) {
+        console.error("Search error:", error);
+      }
     } finally {
-      setLoading(false);
+      if (reqId === searchReqIdRef.current) {
+        setLoading(false);
+      }
     }
   };
 
@@ -3166,13 +3262,16 @@ function App() {
           diagnostics.onPlayerCanPlay();
         }}
         onStalled={() => {
-          setBuffering(false);
+          setBuffering(true);
           diagnostics.onPlayerStalled();
         }}
-        onSuspend={() => setBuffering(false)}
+        onSuspend={() => {}}
         onEmptied={() => setBuffering(false)}
         onError={(e) => {
           const target = e.currentTarget;
+          if (currentTrack) {
+            delete streamCacheRef.current[currentTrack.id];
+          }
           setBuffering(false);
           diagnostics.onPlayerError({
             code: target.error?.code ?? -1,
@@ -3209,6 +3308,31 @@ function App() {
           }
         }}
       />
+
+      {/* Global Ambient Background when Fullscreen Player is Expanded */}
+      {isPlayerExpanded && currentTrack && (
+        <div className="fixed inset-0 z-[1] overflow-hidden pointer-events-none select-none transition-opacity duration-700 ease-out animate-fade-in">
+          {/* Base dynamic radial mesh gradient using track's extracted colors */}
+          <div 
+            className="absolute inset-0 bg-[#08070a]"
+            style={extractedColors ? { 
+              background: `radial-gradient(circle at 60% 40%, ${extractedColors.primary}33 0%, ${extractedColors.secondary || extractedColors.primary}18 50%, #08070a 100%)` 
+            } : {
+              background: "radial-gradient(circle at center, rgba(255,255,255,0.06) 0%, #08070a 100%)"
+            }}
+          />
+          {/* Edge-to-edge blurred album cover art across the entire window */}
+          <div className="absolute inset-0 filter blur-[95px] opacity-35 scale-125 saturate-150 transform-gpu pointer-events-none">
+            <SafeImage 
+              src={getHighQualityThumbnail(currentTrack.thumbnail)} 
+              alt="" 
+              className="w-full h-full object-cover" 
+            />
+          </div>
+          {/* Vignette and backdrop overlay */}
+          <div className="absolute inset-0 bg-black/35 backdrop-blur-3xl" />
+        </div>
+      )}
 
       {activeTab === "artist" && artistData?.thumbnail && (
         <div 
@@ -3264,12 +3388,16 @@ function App() {
         </div>
       )}
 
-      {/* Sidebar Navigation */}
+      {/* Sidebar Navigation - Apple Music Pill Style */}
       <aside
-        style={isPlayerExpanded && extractedColors ? { background: `linear-gradient(180deg, ${extractedColors.primary}55 0%, ${extractedColors.tertiary}20 100%)`, borderRightColor: `${extractedColors.primary}45` } : {}}
-        className={`${sidebarCollapsed ? "w-[72px]" : "w-64"} ${activeTab === "artist" && (!isPlayerExpanded || !extractedColors) ? (artistScrolled ? "bg-[#030303]" : "bg-transparent") : !isPlayerExpanded || !extractedColors ? "bg-bg-dark" : ""} flex flex-col justify-between transition-all duration-300 z-20 ${
-        scrolled ? "border-r border-white/5" : "border-r border-transparent"
-      }`}>
+        className={`${sidebarCollapsed ? "w-[72px]" : "w-64"} ${
+          isPlayerExpanded
+            ? "bg-black/30 border-white/10 shadow-black/50"
+            : activeTab === "artist"
+              ? (artistScrolled ? "bg-[#0c0c0e]/80 border-white/10" : "bg-black/40 border-white/10")
+              : "bg-surface-dark/65 border-white/10"
+        } flex flex-col justify-between transition-all duration-300 z-20 my-3 ml-3 rounded-3xl border shadow-2xl backdrop-blur-2xl flex-shrink-0 relative overflow-hidden`}
+      >
         <div className="p-4">
           <div className={`flex items-center mb-8 ${sidebarCollapsed ? "justify-center" : "justify-between px-2"}`}>
             {sidebarCollapsed ? (
@@ -3363,7 +3491,13 @@ function App() {
       </aside>
 
       {/* Main Content */}
-      <main className={`flex-1 flex flex-col min-w-0 z-10 relative ${activeTab === "artist" ? "bg-transparent" : "bg-gradient-to-b from-surface-dark/40 to-bg-dark"}`}>
+      <main className={`flex-1 flex flex-col min-w-0 z-10 relative ${
+        isPlayerExpanded
+          ? "bg-transparent"
+          : activeTab === "artist"
+            ? "bg-transparent"
+            : "bg-gradient-to-b from-surface-dark/40 to-bg-dark"
+      }`}>
         <header className={`h-20 flex items-center px-8 justify-between gap-4 transition-all duration-300 ${
           activeTab === "artist"
             ? (artistScrolled ? "bg-[#030303]" : "bg-transparent")
@@ -4862,17 +4996,21 @@ function App() {
                                 input.onchange = async (e) => {
                                   const file = (e.target as HTMLInputElement).files?.[0];
                                   if (!file) return;
-                                  const reader = new FileReader();
-                                  reader.onload = (ev) => {
-                                    const dataUrl = ev.target?.result as string;
-                                    const stored = JSON.parse(localStorage.getItem("capi_playlist_covers") || "{}");
+                                  try {
+                                    const dataUrl = await resizeImageBase64(file, 512, 0.8);
+                                    const stored = safeJsonParse<Record<string, string>>(localStorage.getItem("capi_playlist_covers"), {});
                                     stored[playlist.id] = dataUrl;
-                                    localStorage.setItem("capi_playlist_covers", JSON.stringify(stored));
-                                    setPlaylists(prev => prev.map(p =>
-                                      p.id === playlist.id ? { ...p, _coverOverride: dataUrl } : p
-                                    ));
-                                  };
-                                  reader.readAsDataURL(file);
+                                    const ok = safeSetItem("capi_playlist_covers", JSON.stringify(stored), () => {
+                                      showToast("Espacio de almacenamiento local lleno para la portada.");
+                                    });
+                                    if (ok) {
+                                      setPlaylists(prev => prev.map(p =>
+                                        p.id === playlist.id ? { ...p, _coverOverride: dataUrl } : p
+                                      ));
+                                    }
+                                  } catch (err) {
+                                    console.error("Error procesando portada:", err);
+                                  }
                                 };
                                 input.click();
                               }}
@@ -5339,7 +5477,7 @@ function App() {
                     onClick={() => {
                       const saved = localStorage.getItem("capi_listening_stats");
                       if (saved) {
-                        setListeningStats(JSON.parse(saved));
+                        setListeningStats(safeJsonParse(saved, { totalMinutes: 0, trackPlays: {}, artistMinutes: {}, dailyMinutes: {} }));
                       }
                       showToast("Estadísticas actualizadas");
                     }}
@@ -5964,7 +6102,7 @@ function App() {
                                 (ACCENT_COLORS.find(c => c.id === accentColor)?.dark || ACCENT_COLORS[0].dark) 
                               )}}
                             />
-                            <span>{accentColor === "custom" ? "Custom" : (ACCENT_COLORS.find(c => c.id === accentColor)?.name || "Púrpura")}</span>
+                            <span>{accentColor === "custom" ? "Custom" : (ACCENT_COLORS.find(c => c.id === accentColor)?.name || "Blanco")}</span>
                             <ChevronLeft className={`w-3 h-3 transition-transform duration-200 ${showAccentDropdown ? "-rotate-90" : "rotate-180"}`} />
                           </button>
                           <input 
@@ -6307,16 +6445,20 @@ function App() {
                               <input
                                 type="file"
                                 accept="image/*"
-                                onChange={(e) => {
+                                onChange={async (e) => {
                                   const file = e.target.files?.[0];
                                   if (file) {
-                                    const reader = new FileReader();
-                                    reader.onloadend = () => {
-                                      const base64String = reader.result as string;
-                                      setCapiAvatar(base64String);
-                                      localStorage.setItem("capi_user_avatar", base64String);
-                                    };
-                                    reader.readAsDataURL(file);
+                                    try {
+                                      const base64String = await resizeImageBase64(file, 256, 0.85);
+                                      const ok = safeSetItem("capi_user_avatar", base64String, () => {
+                                        showToast("Espacio insuficiente en almacenamiento para el avatar.");
+                                      });
+                                      if (ok) {
+                                        setCapiAvatar(base64String);
+                                      }
+                                    } catch (err) {
+                                      console.error("Error al procesar avatar:", err);
+                                    }
                                   }
                                 }}
                                 className="flex-1 text-sm text-text-secondary file:mr-4 file:py-2 file:px-4 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-brand-primary/10 file:text-brand-primary hover:file:bg-brand-primary/20 file:cursor-pointer"
@@ -6408,7 +6550,7 @@ function App() {
                       <div className="border-b border-white/5 pb-6">
                         <h3 className="font-semibold text-sm text-text-primary mb-3">Capi Desktop</h3>
                         <div className="space-y-2 text-xs text-text-secondary">
-                          <p><span className="font-semibold text-text-primary">Versión:</span> 1.0.0</p>
+                          <p><span className="font-semibold text-text-primary">Versión:</span> 0.1.4</p>
                           <p><span className="font-semibold text-text-primary">Desarrollado con:</span> React 19, TypeScript, Tauri 2, Tailwind CSS 4</p>
                           <p><span className="font-semibold text-text-primary">Motor de audio:</span> capi-engine (Rust, motor embebido)</p>
                           <p><span className="font-semibold text-text-primary">Repositorio:</span> github.com/jh2929/Capi</p>
@@ -6862,12 +7004,16 @@ function App() {
         {/* EXPANDED FULLSCREEN PLAYER */}
         {isPlayerExpanded && currentTrack && (
           <div 
-            style={extractedColors ? { background: `radial-gradient(circle at center, ${extractedColors.primary}25 0%, #0c0a0f 100%)` } : {}}
-            className={`absolute inset-0 bg-bg-dark/95 z-50 flex flex-col p-6 md:p-8 overflow-hidden animate-fade-in backdrop-blur-xl select-none ${isFocusMode ? "justify-between" : ""}`}
+            style={extractedColors ? { 
+              background: `radial-gradient(circle at 50% 35%, ${extractedColors.primary}28 0%, ${extractedColors.secondary || extractedColors.primary}12 45%, #0c0a0f 100%)` 
+            } : { 
+              background: "radial-gradient(circle at center, rgba(255,255,255,0.05) 0%, #0c0a0f 100%)" 
+            }}
+            className={`absolute inset-0 bg-[#0c0a0f]/95 z-50 flex flex-col p-6 md:p-8 overflow-hidden animate-fade-in backdrop-blur-2xl select-none ${isFocusMode ? "justify-between" : ""}`}
           >
             {/* Ambient Blurred Background Art */}
             <div className="absolute inset-0 z-0 overflow-hidden filter blur-3xl opacity-25 pointer-events-none scale-125">
-              <SafeImage src={currentTrack.thumbnail} alt="" className="w-full h-full object-cover" />
+              <SafeImage src={getHighQualityThumbnail(currentTrack.thumbnail)} alt="" className="w-full h-full object-cover" />
             </div>
 
             {/* ═══════════════════════════════════════════════════════════════
