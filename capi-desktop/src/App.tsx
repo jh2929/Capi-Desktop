@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import Logo from "./assets/Logo.png";
@@ -9,7 +9,7 @@ import {
   MoreVertical, X, Sparkle, GripVertical, Copy, RefreshCw,
   User, Radio, Mic2, LayoutGrid, List, Plus, Bell,
   Moon, Timer, BarChart3, Languages, RotateCcw, Trophy, Users, Repeat, Repeat1, Lock, Unlock, Upload, Pencil, HardDrive,
-  FileText
+  FileText, Check, CheckSquare
 } from "lucide-react";
 import "./App.css";
 import { t, Locale, LOCALE_NAMES, TranslationKeys } from "./i18n";
@@ -112,6 +112,7 @@ interface Track {
   id: string;
   title: string;
   artist: string;
+  primaryArtist?: string;
   album?: string;
   duration: number;
   thumbnail: string;
@@ -154,6 +155,113 @@ const getBannerUrl = (url: string) => {
     }
   }
   return url;
+};
+
+const normalizeTrackTitleKey = (title: string): string => {
+  if (!title) return "";
+  return title
+    .toLowerCase()
+    .replace(/\s*[\(\[](?:official\s*(?:music\s*)?video|video\s*oficial|audio\s*oficial|official\s*audio|official\s*lyric\s*video|lyric\s*video|video\s*con\s*letra|letra|audio|visualizer|official\s*visualizer|video|clip\s*officiel|videoclip|en\s*vivo|live(?:\s+at[^)\]]*)?|remaster(?:ed)?(?:\s+\d{4})?|deluxe(?:\s+edition)?|bonus\s*track|versi[oó]n\s*[^)\]]+)[\)\]]/gi, "")
+    .replace(/\s*-\s*(?:official\s*(?:music\s*)?video|video\s*oficial|audio\s*oficial|official\s*audio|lyric\s*video|letra|audio|visualizer|en\s*vivo|live|remaster(?:ed)?.*)$/gi, "")
+    .replace(/\s*[\(\[](?:feat\.?|ft\.?)\s+[^)\]]+[\)\]]/gi, "")
+    .replace(/\s*-\s*(?:feat\.?|ft\.?)\s+.*$/gi, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, "")
+    .trim()
+    .replace(/\s+/g, " ");
+};
+
+const deduplicateTracks = (tracks: Track[]): Track[] => {
+  const seenIds = new Set<string>();
+  const seenTitleKeys = new Set<string>();
+  const result: Track[] = [];
+
+  for (const track of tracks) {
+    if (!track || !track.id) continue;
+    if (seenIds.has(track.id)) continue;
+
+    const normKey = normalizeTrackTitleKey(track.title);
+    if (normKey) {
+      if (seenTitleKeys.has(normKey)) {
+        continue;
+      }
+      seenTitleKeys.add(normKey);
+    }
+
+    seenIds.add(track.id);
+    result.push(track);
+  }
+
+  return result;
+};
+
+const cleanSearchString = (str: string): string => {
+  if (!str) return "";
+  return str
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
+    .trim()
+    .replace(/\s+/g, " ");
+};
+
+const rankSearchResults = (searchQuery: string, rawTracks: Track[]): Track[] => {
+  const normQuery = cleanSearchString(searchQuery);
+  if (!normQuery) return deduplicateTracks(rawTracks);
+
+  const queryWords = normQuery.split(" ").filter(w => w.length > 0);
+
+  const scored = rawTracks.map(track => {
+    const normTitle = cleanSearchString(track.title);
+    const normArtist = cleanSearchString(track.artist || "");
+    const normCombined = `${normTitle} ${normArtist}`;
+    let score = 0;
+
+    if (normTitle === normQuery) {
+      score += 1000;
+    } else if (normTitle.startsWith(normQuery)) {
+      score += 600;
+    } else if (normTitle.includes(normQuery)) {
+      score += 350;
+    }
+
+    if (normArtist === normQuery) {
+      score += 500;
+    } else if (normArtist.startsWith(normQuery)) {
+      score += 300;
+    } else if (normArtist.includes(normQuery)) {
+      score += 150;
+    }
+
+    let matchedWords = 0;
+    for (const word of queryWords) {
+      if (normTitle.includes(word)) {
+        matchedWords += 1.5;
+        score += 80;
+      } else if (normArtist.includes(word)) {
+        matchedWords += 1;
+        score += 50;
+      }
+    }
+    const matchRatio = queryWords.length > 0 ? matchedWords / queryWords.length : 0;
+    score += Math.round(matchRatio * 150);
+
+    if (normCombined.includes(normQuery)) {
+      score += 200;
+    }
+
+    const lowerTitle = (track.title || "").toLowerCase();
+    if (!normQuery.includes("karaoke") && lowerTitle.includes("karaoke")) score -= 300;
+    if (!normQuery.includes("tribute") && lowerTitle.includes("tribute")) score -= 200;
+    if (!normQuery.includes("cover") && lowerTitle.includes("cover")) score -= 150;
+    if (!normQuery.includes("instrumental") && lowerTitle.includes("instrumental")) score -= 100;
+    if (!normQuery.includes("8d") && lowerTitle.includes("8d")) score -= 200;
+
+    return { track, score };
+  });
+
+  scored.sort((a, b) => b.score - a.score);
+  return deduplicateTracks(scored.map(s => s.track));
 };
 
 interface Playlist {
@@ -236,6 +344,9 @@ const convertYTItemToTrack = (item: any): Track => ({
   artist: item.artists
     ? (typeof item.artists[0] === 'object' ? item.artists.map((a: any) => a.name || a).join(", ") : item.artists.join(", "))
     : (item.author && item.author !== "YT Music" ? item.author : "Artista Desconocido"),
+  primaryArtist: item.primaryArtist 
+    || (item.artists && item.artists[0] ? (typeof item.artists[0] === 'object' ? item.artists[0].name : item.artists[0]) : undefined)
+    || (item.author && item.author !== "YT Music" ? item.author : undefined),
   album: item.album || "",
   duration: item.duration || 0,
   thumbnail: item.thumbnail || "https://images.unsplash.com/photo-1614680376593-902f74fa0d41?q=80&w=300",
@@ -363,6 +474,28 @@ function App() {
     isEnabled().then(setAutostartEnabled).catch(() => {});
   }, []);
 
+  useEffect(() => {
+    invoke<Record<string, string>>("consolidar_carpetas_descargas").then((mappings) => {
+      if (mappings && Object.keys(mappings).length > 0) {
+        setDownloads(prev => {
+          let changed = false;
+          const copy = { ...prev };
+          for (const [trackId, oldPath] of Object.entries(copy)) {
+            if (mappings[oldPath]) {
+              copy[trackId] = mappings[oldPath];
+              changed = true;
+            }
+          }
+          if (changed) {
+            safeSetItem("capi_downloads", JSON.stringify(copy));
+            return copy;
+          }
+          return prev;
+        });
+      }
+    }).catch(() => {});
+  }, []);
+
   const [carouselIndex, setCarouselIndex] = useState(0);
 
   // Structured toast state
@@ -483,6 +616,13 @@ function App() {
   const [homeSections, setHomeSections] = useState<any[]>([]);
   const [artistData, setArtistData] = useState<any>(null);
   const [loadingArtist, setLoadingArtist] = useState(false);
+
+  // Progressive search state
+  const [searchContinuation, setSearchContinuation] = useState<string | null>(null);
+  const [loadingMoreSearch, setLoadingMoreSearch] = useState(false);
+  const [hasMoreSearch, setHasMoreSearch] = useState(false);
+  const [searchFilterText, setSearchFilterText] = useState("");
+  const currentSearchQueryRef = useRef<string>("");
   
   // Persisted state
   const migrateKey = (oldKey: string, newKey: string) => {
@@ -1078,6 +1218,11 @@ function App() {
               banner.style.transform = `translateY(-${el.scrollTop}px)`;
             }
           }
+          if (activeTab === "buscar") {
+            if (el.scrollTop + el.clientHeight >= el.scrollHeight - 350) {
+              loadMoreSearchResults();
+            }
+          }
           ticking = false;
         });
         ticking = true;
@@ -1561,6 +1706,21 @@ function App() {
     try {
       const response = await invoke<string>("obtener_artista", { id: artistId });
       const parsed = JSON.parse(response);
+      if (parsed?.sections && Array.isArray(parsed.sections)) {
+        parsed.sections = parsed.sections.map((section: any) => {
+          if (!section?.items || !Array.isArray(section.items)) return section;
+          const seen = new Set<string>();
+          const dedupedItems = section.items.filter((item: any) => {
+            if (item.type !== "song") return true;
+            const key = normalizeTrackTitleKey(item.title);
+            if (!key) return true;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+          });
+          return { ...section, items: dedupedItems };
+        });
+      }
       setArtistData(parsed);
       navigateTo("artist", { artistId, artistData: parsed });
     } catch (e) {
@@ -2501,6 +2661,7 @@ function App() {
         trackId: track.id,
         title: track.title,
         artist: track.artist,
+        primaryArtist: track.primaryArtist || undefined,
         url: stream
       });
 
@@ -2553,11 +2714,18 @@ function App() {
   const performSearchWithQuery = async (searchQuery: string) => {
     if (!searchQuery.trim()) return;
     const reqId = ++searchReqIdRef.current;
+    currentSearchQueryRef.current = searchQuery.trim();
     navigateTo("buscar");
     setLoading(true);
     setShowSearchDropdown(false);
+    setSearchContinuation(null);
+    setHasMoreSearch(false);
+    setSearchFilterText("");
     try {
-      const responseJson = await invoke<string>("buscar_cancion", { query: searchQuery });
+      const responseJson = await invoke<string>("buscar_cancion_progresivo", {
+        query: searchQuery,
+        continuation: null,
+      });
       if (reqId !== searchReqIdRef.current) return;
       const data = safeJsonParse<any>(responseJson, null);
 
@@ -2568,7 +2736,8 @@ function App() {
         return;
       }
       
-      let parsedTracks: Track[] = (Array.isArray(data) ? data : data?.tracks || data?.results || []).map((t: any) => ({
+      const rawItems = Array.isArray(data) ? data : (data?.songs || data?.tracks || data?.results || []);
+      const parsedTracks: Track[] = rawItems.map((t: any) => ({
         id: t.id, title: t.title, artist: (t.artist && t.artist !== "YT Music") ? t.artist : "Artista Desconocido",
         album: t.album || "", duration: t.duration || 0,
         thumbnail: t.thumbnail || "https://images.unsplash.com/photo-1614680376593-902f74fa0d41?q=80&w=300",
@@ -2576,21 +2745,23 @@ function App() {
         artistId: t.artistId || undefined
       }));
 
-      if (parsedTracks.length > 1) {
-        const mainArtist = parsedTracks[0].artist.toLowerCase();
-        const sameArtist = parsedTracks.filter(t => t.artist.toLowerCase() === mainArtist);
-        const others = parsedTracks.filter(t => t.artist.toLowerCase() !== mainArtist);
-        parsedTracks = [...sameArtist.slice(0, 10), ...others, ...sameArtist.slice(10)];
-      }
+      const ranked = rankSearchResults(searchQuery, parsedTracks);
+      setTracks(ranked);
 
-      setTracks(parsedTracks);
+      if (data?.continuation) {
+        setSearchContinuation(data.continuation);
+        setHasMoreSearch(true);
+      } else {
+        setSearchContinuation(null);
+        setHasMoreSearch(false);
+      }
 
       setSearchHistory(prev => {
         const filtered = prev.filter(h => h !== searchQuery.trim());
         return [searchQuery.trim(), ...filtered].slice(0, 15);
       });
-      if (parsedTracks.length > 0) {
-        setSearchThumbnails(prev => ({ ...prev, [searchQuery.trim()]: parsedTracks[0].thumbnail }));
+      if (ranked.length > 0) {
+        setSearchThumbnails(prev => ({ ...prev, [searchQuery.trim()]: ranked[0].thumbnail }));
       }
     } catch (error: any) {
       if (reqId === searchReqIdRef.current) {
@@ -2600,6 +2771,53 @@ function App() {
       if (reqId === searchReqIdRef.current) {
         setLoading(false);
       }
+    }
+  };
+
+  const loadMoreSearchResults = async () => {
+    if (loadingMoreSearch || !hasMoreSearch || !searchContinuation || !currentSearchQueryRef.current) {
+      return;
+    }
+    setLoadingMoreSearch(true);
+    try {
+      const responseJson = await invoke<string>("buscar_cancion_progresivo", {
+        query: currentSearchQueryRef.current,
+        continuation: searchContinuation,
+      });
+      const data = safeJsonParse<any>(responseJson, null);
+      if (data && !data.error) {
+        const rawItems = Array.isArray(data) ? data : (data?.songs || data?.tracks || data?.results || []);
+        const nextTracks: Track[] = rawItems.map((t: any) => ({
+          id: t.id,
+          title: t.title,
+          artist: (t.artist && t.artist !== "YT Music") ? t.artist : "Artista Desconocido",
+          album: t.album || "",
+          duration: t.duration || 0,
+          thumbnail: t.thumbnail || "https://images.unsplash.com/photo-1614680376593-902f74fa0d41?q=80&w=300",
+          explicit: t.explicit || false,
+          artistId: t.artistId || undefined
+        }));
+
+        setTracks(prev => {
+          const combined = [...prev, ...nextTracks];
+          return deduplicateTracks(combined);
+        });
+
+        if (data?.continuation) {
+          setSearchContinuation(data.continuation);
+          setHasMoreSearch(true);
+        } else {
+          setSearchContinuation(null);
+          setHasMoreSearch(false);
+        }
+      } else {
+        setHasMoreSearch(false);
+      }
+    } catch (e) {
+      console.warn("Failed to load more search results:", e);
+      setHasMoreSearch(false);
+    } finally {
+      setLoadingMoreSearch(false);
     }
   };
 
@@ -2842,12 +3060,36 @@ function App() {
     });
   };
 
+  const getCurrentViewTracks = (): Track[] => {
+    if (activeTab === "buscar") return visibleSearchTracks;
+    if (activeTab === "favoritos") return favorites;
+    if (activeTab === "album_view") return currentAlbumTracks;
+    if (activeTab === "playlists") {
+      return playlists.find(p => p.id === selectedPlaylistId)?.tracks || [];
+    }
+    if (activeTab === "biblioteca") {
+      if (libTab === "downloads") return downloadedMetadata;
+      if (libTab === "history") return history;
+      if (libTab === "local") return localTracks;
+    }
+    if (activeTab === "artist" && artistData?.sections) {
+      return deduplicateTracks(
+        artistData.sections.flatMap((s: any) =>
+          (s.items || []).filter((it: any) => it.type === "song").map(convertYTItemToTrack)
+        )
+      );
+    }
+    return tracks;
+  };
+
   const [showPlaylistDropdown, setShowPlaylistDropdown] = useState(false);
   const playlistDropdownRef = useRef<HTMLDivElement | null>(null);
 
   const handleSelectAll = () => {
-    const currentList = libTab === "downloads" ? downloadedMetadata : libTab === "history" ? history : localTracks;
-    if (selectedTrackIds.size === currentList.length) {
+    const currentList = getCurrentViewTracks();
+    if (currentList.length === 0) return;
+    const allSelected = currentList.every(t => selectedTrackIds.has(t.id));
+    if (allSelected) {
       setSelectedTrackIds(new Set());
     } else {
       setSelectedTrackIds(new Set(currentList.map(t => t.id)));
@@ -2858,13 +3100,119 @@ function App() {
     const ids = Array.from(selectedTrackIds);
     for (const id of ids) { await deleteLocalTrack(id); }
     setSelectedTrackIds(new Set());
+    setShowSelectionMode(false);
+  };
+
+  const [isBatchDownloading, setIsBatchDownloading] = useState(false);
+
+  const handleBatchDownload = async () => {
+    if (selectedTrackIds.size === 0) return;
+
+    const allKnownTracks = [
+      ...tracks,
+      ...favorites,
+      ...currentAlbumTracks,
+      ...downloadedMetadata,
+      ...history,
+      ...localTracks,
+      ...activeQueue,
+      ...(playlists.find(p => p.id === selectedPlaylistId)?.tracks || []),
+      ...(artistData?.sections ? artistData.sections.flatMap((s: any) => s.items.filter((it: any) => it.type === "song").map(convertYTItemToTrack)) : [])
+    ];
+
+    const toDownloadMap = new Map<string, Track>();
+    selectedTrackIds.forEach(id => {
+      const found = allKnownTracks.find(t => t.id === id);
+      if (found && !downloads[found.id]) {
+        toDownloadMap.set(found.id, found);
+      }
+    });
+
+    const toDownload = Array.from(toDownloadMap.values());
+    if (toDownload.length === 0) {
+      if (Array.from(selectedTrackIds).some(id => downloads[id])) {
+        showToast("Las canciones seleccionadas ya están descargadas");
+      } else {
+        showToast("No se encontraron canciones para descargar");
+      }
+      return;
+    }
+
+    setIsBatchDownloading(true);
+    showToast(`Iniciando descarga de ${toDownload.length} canciones...`);
+
+    const concurrency = 3;
+    let index = 0;
+    const worker = async () => {
+      while (index < toDownload.length) {
+        const trk = toDownload[index++];
+        try {
+          await downloadTrack(trk);
+        } catch (e) {
+          console.error("Error descargando:", trk.title, e);
+        }
+      }
+    };
+
+    try {
+      const workers = Array.from({ length: Math.min(concurrency, toDownload.length) }, () => worker());
+      await Promise.all(workers);
+      showToast(`Descarga en lote finalizada (${toDownload.length} canciones)`);
+    } finally {
+      setIsBatchDownloading(false);
+      setSelectedTrackIds(new Set());
+      setShowSelectionMode(false);
+    }
+  };
+
+  const handleBatchAddToFavorites = () => {
+    const allKnownTracks = [
+      ...tracks,
+      ...favorites,
+      ...currentAlbumTracks,
+      ...downloadedMetadata,
+      ...history,
+      ...localTracks,
+      ...activeQueue,
+      ...(playlists.find(p => p.id === selectedPlaylistId)?.tracks || []),
+      ...(artistData?.sections ? artistData.sections.flatMap((s: any) => s.items.filter((it: any) => it.type === "song").map(convertYTItemToTrack)) : [])
+    ];
+    const toAdd: Track[] = [];
+    const seen = new Set<string>();
+    selectedTrackIds.forEach(id => {
+      const match = allKnownTracks.find(t => t.id === id);
+      if (match && !seen.has(match.id)) {
+        seen.add(match.id);
+        toAdd.push(match);
+      }
+    });
+    if (toAdd.length > 0) {
+      addTracksToFavorites(toAdd);
+      setSelectedTrackIds(new Set());
+      setShowSelectionMode(false);
+    }
   };
 
   const handleBatchAddToPlaylist = (playlistId: string) => {
+    const allKnownTracks = [
+      ...tracks,
+      ...favorites,
+      ...currentAlbumTracks,
+      ...downloadedMetadata,
+      ...history,
+      ...localTracks,
+      ...activeQueue,
+      ...(playlists.find(p => p.id === selectedPlaylistId)?.tracks || []),
+      ...(artistData?.sections ? artistData.sections.flatMap((s: any) => s.items.filter((it: any) => it.type === "song").map(convertYTItemToTrack)) : [])
+    ];
     const listToInsert: Track[] = [];
+    const seen = new Set<string>();
     selectedTrackIds.forEach(id => {
-      const match = downloadedMetadata.find(t => t.id === id) || history.find(t => t.id === id) || tracks.find(t => t.id === id);
-      if (match) listToInsert.push(match);
+      const match = allKnownTracks.find(t => t.id === id);
+      if (match && !seen.has(match.id)) {
+        seen.add(match.id);
+        listToInsert.push(match);
+      }
     });
     setPlaylists(prev => prev.map(p => {
       if (p.id === playlistId) {
@@ -2874,7 +3222,10 @@ function App() {
       }
       return p;
     }));
+    showToast(`Se añadieron ${listToInsert.length} canciones a la playlist`);
     setSelectedTrackIds(new Set());
+    setShowSelectionMode(false);
+    setShowPlaylistDropdown(false);
   };
 
   const handleToggleSidebar = () => {
@@ -3224,6 +3575,14 @@ function App() {
   };
   const quickPicksTracks = getQuickPicksTracks();
 
+  const visibleSearchTracks: Track[] = useMemo<Track[]>(() => {
+    if (!searchFilterText.trim()) return tracks;
+    const q = cleanSearchString(searchFilterText);
+    return tracks.filter(t =>
+      cleanSearchString(t.title).includes(q) || cleanSearchString(t.artist || "").includes(q)
+    );
+  }, [tracks, searchFilterText]);
+
   return (
     <div className="flex h-screen w-screen bg-bg-dark text-text-primary overflow-hidden font-sans">
       <audio
@@ -3364,19 +3723,6 @@ function App() {
           {/* Top fade for header readability */}
           <div className="absolute inset-0 bg-gradient-to-b from-black/50 via-black/5 to-transparent pointer-events-none" />
 
-          <div className={`absolute top-0 left-0 right-0 p-8 pb-0 transition-all duration-300 ${
-            sidebarCollapsed ? "pl-[104px]" : "pl-[288px]"
-          }`}>
-            <button
-              onClick={goBack}
-              disabled={navIndex === 0}
-              className="p-1 disabled:opacity-30 transition text-white hover:text-white/80 pointer-events-auto"
-              title="Atrás"
-            >
-              <ChevronLeft className="w-5 h-5" />
-            </button>
-          </div>
-
           <div className={`absolute bottom-0 left-0 right-0 p-8 pb-12 transition-all duration-300 ${
             sidebarCollapsed ? "pl-[104px]" : "pl-[288px]"
           }`}>
@@ -3385,6 +3731,24 @@ function App() {
               <p className="text-sm text-text-secondary mt-1 max-w-2xl line-clamp-2 drop-shadow-sm">{artistData.description}</p>
             )}
           </div>
+        </div>
+      )}
+
+      {/* Floating back button for Artist profile, safely positioned below top navbar */}
+      {activeTab === "artist" && (
+        <div 
+          className={`fixed top-24 transition-all duration-300 z-40 ${
+            sidebarCollapsed ? "left-[92px]" : "left-[276px]"
+          }`}
+        >
+          <button
+            onClick={goBack}
+            className="flex items-center gap-1.5 px-3.5 py-2 rounded-full bg-black/60 hover:bg-black/90 backdrop-blur-md border border-white/20 text-white shadow-xl hover:scale-105 active:scale-95 transition-all cursor-pointer font-medium text-xs group pointer-events-auto"
+            title="Atrás"
+          >
+            <ChevronLeft className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform" />
+            <span>Atrás</span>
+          </button>
         </div>
       )}
 
@@ -4061,21 +4425,64 @@ function App() {
                   </button>
                 )}
                 <h2 className="text-2xl font-bold tracking-tight flex-1">{tracks.length > 0 ? "Resultados de Búsqueda" : "Buscar"}</h2>
-                <div className="flex gap-2 bg-white/5 p-1 rounded-xl">
-                  <button
-                    onClick={() => setSearchViewMode("grid")}
-                    className={`p-1.5 rounded-lg transition ${searchViewMode === "grid" ? "bg-brand-primary text-bg-dark" : "text-text-secondary hover:text-text-primary"}`}
-                    title="Cuadrícula"
-                  >
-                    <LayoutGrid className="w-4 h-4" />
-                  </button>
-                  <button
-                    onClick={() => setSearchViewMode("list")}
-                    className={`p-1.5 rounded-lg transition ${searchViewMode === "list" ? "bg-brand-primary text-bg-dark" : "text-text-secondary hover:text-text-primary"}`}
-                    title="Lista"
-                  >
-                    <List className="w-4 h-4" />
-                  </button>
+                <div className="flex gap-2 items-center">
+                  {tracks.length > 0 && (
+                    <div className="relative">
+                      <input
+                        type="text"
+                        value={searchFilterText}
+                        onChange={(e) => setSearchFilterText(e.target.value)}
+                        placeholder="Filtrar resultados..."
+                        className="bg-white/5 border border-white/10 rounded-xl pl-8 pr-7 py-1.5 text-xs text-text-primary placeholder-text-secondary focus:outline-none focus:border-brand-primary w-40 sm:w-52 transition"
+                      />
+                      <Search className="w-3.5 h-3.5 text-text-secondary absolute left-2.5 top-2.5" />
+                      {searchFilterText && (
+                        <button
+                          onClick={() => setSearchFilterText("")}
+                          className="absolute right-2 top-2 text-text-secondary hover:text-white"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  {tracks.length > 0 && (
+                    <button
+                      onClick={() => {
+                        if (showSelectionMode) {
+                          setShowSelectionMode(false);
+                          setSelectedTrackIds(new Set());
+                        } else {
+                          setShowSelectionMode(true);
+                        }
+                      }}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition ${
+                        showSelectionMode 
+                          ? "bg-brand-primary text-bg-dark font-bold shadow" 
+                          : "bg-white/5 hover:bg-white/10 text-text-secondary hover:text-white"
+                      }`}
+                      title={showSelectionMode ? "Salir de selección múltiple" : "Selección múltiple"}
+                    >
+                      <CheckSquare className="w-3.5 h-3.5" />
+                      <span>{showSelectionMode ? "Cancelar selección" : "Seleccionar"}</span>
+                    </button>
+                  )}
+                  <div className="flex gap-1 bg-white/5 p-1 rounded-xl">
+                    <button
+                      onClick={() => setSearchViewMode("grid")}
+                      className={`p-1.5 rounded-lg transition ${searchViewMode === "grid" ? "bg-brand-primary text-bg-dark" : "text-text-secondary hover:text-text-primary"}`}
+                      title="Cuadrícula"
+                    >
+                      <LayoutGrid className="w-4 h-4" />
+                    </button>
+                    <button
+                      onClick={() => setSearchViewMode("list")}
+                      className={`p-1.5 rounded-lg transition ${searchViewMode === "list" ? "bg-brand-primary text-bg-dark" : "text-text-secondary hover:text-text-primary"}`}
+                      title="Lista"
+                    >
+                      <List className="w-4 h-4" />
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -4101,113 +4508,184 @@ function App() {
               )}
 
               {tracks.length > 0 ? (
-                searchViewMode === "grid" ? (
-                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 animate-fade-in">
-                    {tracks.map((track) => (
-                      <div
-                        key={track.id}
-                        onContextMenu={(e) => openContextMenu(e, track.id)}
-                        className="group flex flex-col"
-                      >
-                        <div className="relative aspect-video rounded-xl overflow-hidden mb-2 bg-black/40 shadow-sm">
-                          <SafeImage trackId={track.id} src={track.thumbnail} alt={track.title} className="w-full h-full object-cover group-hover:scale-105 transition" />
-                          {/* Three-dot top-right */}
-                          <button 
-                            onClick={(e) => { e.stopPropagation(); openContextMenu(e, track.id); }}
-                            className="absolute top-2 right-2 z-10 p-1.5 rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition hover:bg-brand-primary"
-                          >
-                            <MoreVertical className="w-4 h-4" />
-                          </button>
-                          {/* Download progress overlay */}
-                          {downloadProgress[track.id] !== undefined && (
-                            <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center gap-2 z-20">
-                              <Loader2 className="w-6 h-6 text-brand-primary animate-spin" />
-                              <span className="text-xs font-semibold">{downloadProgress[track.id]}%</span>
-                            </div>
-                          )}
-                          {/* Play button bottom-right */}
-                          <div className="absolute bottom-2 right-2 z-10 opacity-0 group-hover:opacity-100 transition translate-y-1 group-hover:translate-y-0">
+                <>
+                  {searchViewMode === "grid" ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 animate-fade-in">
+                      {visibleSearchTracks.map((track) => (
+                        <div
+                          key={track.id}
+                          onContextMenu={(e) => openContextMenu(e, track.id)}
+                          onClick={() => {
+                            if (showSelectionMode) {
+                              handleSelectTrack(track.id);
+                            }
+                          }}
+                          className={`group flex flex-col p-2 rounded-2xl transition duration-150 ${
+                            showSelectionMode ? "cursor-pointer" : ""
+                          } ${
+                            selectedTrackIds.has(track.id) ? "bg-brand-primary/10 border border-brand-primary/40 shadow-sm" : ""
+                          }`}
+                        >
+                          <div className="relative aspect-video rounded-xl overflow-hidden mb-2 bg-black/40 shadow-sm">
+                            {showSelectionMode && (
+                              <div 
+                                onClick={(e) => { e.stopPropagation(); handleSelectTrack(track.id); }}
+                                className={`absolute top-2 left-2 z-30 w-6 h-6 rounded-full border-2 flex items-center justify-center cursor-pointer shadow-md transition-all ${
+                                  selectedTrackIds.has(track.id) 
+                                    ? "bg-brand-primary border-brand-primary" 
+                                    : "bg-black/60 border-white/40 hover:border-brand-primary/80"
+                                }`}
+                              >
+                                {selectedTrackIds.has(track.id) && (
+                                  <Check className="w-3.5 h-3.5 text-bg-dark stroke-[3]" />
+                                )}
+                              </div>
+                            )}
+                            <SafeImage trackId={track.id} src={track.thumbnail} alt={track.title} className="w-full h-full object-cover group-hover:scale-105 transition" />
+                            {/* Three-dot top-right */}
                             <button 
-                              onClick={(e) => {
-                                e.stopPropagation();
+                              onClick={(e) => { e.stopPropagation(); openContextMenu(e, track.id); }}
+                              className="absolute top-2 right-2 z-10 p-1.5 rounded-full bg-black/60 text-white opacity-0 group-hover:opacity-100 transition hover:bg-brand-primary"
+                            >
+                              <MoreVertical className="w-4 h-4" />
+                            </button>
+                            {/* Download progress overlay */}
+                            {downloadProgress[track.id] !== undefined && (
+                              <div className="absolute inset-0 bg-black/75 flex flex-col items-center justify-center gap-2 z-20">
+                                <Loader2 className="w-6 h-6 text-brand-primary animate-spin" />
+                                <span className="text-xs font-semibold">{downloadProgress[track.id]}%</span>
+                              </div>
+                            )}
+                            {/* Play button bottom-right */}
+                            {!showSelectionMode && (
+                              <div className="absolute bottom-2 right-2 z-10 opacity-0 group-hover:opacity-100 transition translate-y-1 group-hover:translate-y-0">
+                                <button 
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    if (currentTrack?.id === track.id) {
+                                      togglePlay();
+                                    } else {
+                                      playTrack(track, visibleSearchTracks);
+                                    }
+                                  }}
+                                  className="w-10 h-10 rounded-full bg-brand-primary flex items-center justify-center text-bg-dark shadow-lg hover:scale-105 transition"
+                                >
+                                  {currentTrack?.id === track.id && isPlaying ? (
+                                    <Pause className="w-4 h-4 fill-current" />
+                                  ) : (
+                                    <Play className="w-4 h-4 fill-current" />
+                                  )}
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                          <h3 className="font-semibold text-sm truncate text-text-primary">{track.title}</h3>
+                          <p className="text-xs text-text-secondary truncate mt-0.5">{track.artist}</p>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="flex flex-col gap-2 w-full animate-fade-in">
+                      {visibleSearchTracks.map((track, idx) => (
+                        <div
+                          key={track.id}
+                          onContextMenu={(e) => openContextMenu(e, track.id)}
+                          className={`flex items-center gap-4 p-3 rounded-xl transition duration-200 bg-surface-dark/30 hover:bg-surface-dark/70 border cursor-pointer group ${
+                            selectedTrackIds.has(track.id) 
+                              ? "bg-brand-primary/10 border-brand-primary/40 shadow-sm" 
+                              : currentTrack?.id === track.id 
+                              ? "bg-brand-primary/10 border-brand-primary/20" 
+                              : "border-white/5"
+                          }`}
+                          onClick={() => {
+                            if (showSelectionMode) {
+                              handleSelectTrack(track.id);
+                            } else {
+                              playTrack(track, visibleSearchTracks);
+                            }
+                          }}
+                        >
+                          {showSelectionMode ? (
+                            <div 
+                              onClick={(e) => { e.stopPropagation(); handleSelectTrack(track.id); }}
+                              className={`w-5 h-5 rounded-full border-2 flex items-center justify-center cursor-pointer mr-1 flex-shrink-0 transition-all ${
+                                selectedTrackIds.has(track.id) 
+                                  ? "bg-brand-primary border-brand-primary" 
+                                  : "border-white/20 hover:border-brand-primary/60"
+                              }`}
+                            >
+                              {selectedTrackIds.has(track.id) && (
+                                <Check className="w-3 h-3 text-bg-dark stroke-[3]" />
+                              )}
+                            </div>
+                          ) : (
+                            <span className="text-xs text-text-secondary w-5 text-right font-medium">{idx + 1}</span>
+                          )}
+                          <SafeImage trackId={track.id} src={track.thumbnail} className="w-11 h-11 rounded-lg object-cover shadow-md flex-shrink-0" alt={track.title} />
+                          <div className="min-w-0 flex-1">
+                            <p className={`font-semibold text-sm truncate ${currentTrack?.id === track.id ? "text-brand-primary" : "text-text-primary"}`}>{track.title}</p>
+                            <div className="flex items-center gap-1.5 min-w-0 mt-0.5">
+                              <p className="text-xs text-black dark:text-neutral-300 font-semibold truncate">{track.artist}</p>
+                              {downloads[track.id] && (
+                                <span className="flex-shrink-0 text-brand-primary" title="Descargado localmente">
+                                  <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9" fill="currentColor"/><path d="M12 7v8M12 15l-3-3M12 15l3-3" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none" className="text-bg-dark"/></svg>
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                          <div className="text-xs text-text-secondary hidden md:block w-1/4 truncate">
+                            {track.album || "Sencillo"}
+                          </div>
+                          <span className="text-xs text-text-secondary hidden sm:block w-16 text-right mr-2">{formatTime(track.duration)}</span>
+                          <div className="flex items-center gap-2">
+                            <button 
+                              onClick={(e) => { 
+                                e.stopPropagation(); 
                                 if (currentTrack?.id === track.id) {
                                   togglePlay();
                                 } else {
-                                  playTrack(track, tracks);
+                                  playTrack(track, visibleSearchTracks); 
                                 }
-                              }}
-                              className="w-10 h-10 rounded-full bg-brand-primary flex items-center justify-center text-bg-dark shadow-lg hover:scale-105 transition"
+                              }} 
+                              className="p-2 bg-brand-primary text-bg-dark rounded-full opacity-0 group-hover:opacity-100 transition shadow hover:scale-105"
                             >
                               {currentTrack?.id === track.id && isPlaying ? (
-                                <Pause className="w-4 h-4 fill-current" />
+                                <Pause className="w-3.5 h-3.5 fill-current" />
                               ) : (
-                                <Play className="w-4 h-4 fill-current" />
+                                <Play className="w-3.5 h-3.5 fill-current" />
                               )}
+                            </button>
+                            <button 
+                              onClick={(e) => { e.stopPropagation(); openContextMenu(e, track.id); }} 
+                              className="p-2 text-text-secondary hover:text-brand-primary transition rounded-lg"
+                            >
+                              <MoreVertical className="w-4 h-4" />
                             </button>
                           </div>
                         </div>
-                        <h3 className="font-semibold text-sm truncate text-text-primary">{track.title}</h3>
-                        <p className="text-xs text-text-secondary truncate mt-0.5">{track.artist}</p>
-                      </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="flex flex-col gap-2 w-full animate-fade-in">
-                    {tracks.map((track, idx) => (
-                      <div
-                        key={track.id}
-                        onContextMenu={(e) => openContextMenu(e, track.id)}
-                        className={`flex items-center gap-4 p-3 rounded-xl transition duration-200 bg-surface-dark/30 hover:bg-surface-dark/70 border border-white/5 cursor-pointer group ${
-                          currentTrack?.id === track.id ? "bg-brand-primary/10 border-brand-primary/20" : "border-transparent"
-                        }`}
-                        onClick={() => playTrack(track, tracks)}
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Progressive loading feedback */}
+                  {loadingMoreSearch && (
+                    <div className="py-6 flex items-center justify-center gap-2 text-brand-primary animate-fade-in">
+                      <Loader2 className="w-5 h-5 animate-spin" />
+                      <span className="text-xs font-semibold text-text-secondary">Cargando más canciones desde el motor Rust...</span>
+                    </div>
+                  )}
+                  {hasMoreSearch && !loadingMoreSearch && (
+                    <div className="py-4 flex justify-center">
+                      <button
+                        onClick={loadMoreSearchResults}
+                        className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs font-semibold text-text-secondary hover:text-white transition flex items-center gap-2 cursor-pointer shadow-sm hover:scale-105"
                       >
-                        <span className="text-xs text-text-secondary w-5 text-right font-medium">{idx + 1}</span>
-                        <SafeImage trackId={track.id} src={track.thumbnail} className="w-11 h-11 rounded-lg object-cover shadow-md flex-shrink-0" alt={track.title} />
-                        <div className="min-w-0 flex-1">
-                          <p className={`font-semibold text-sm truncate ${currentTrack?.id === track.id ? "text-brand-primary" : "text-text-primary"}`}>{track.title}</p>
-                          <div className="flex items-center gap-1.5 min-w-0 mt-0.5">
-                            <p className="text-xs text-black dark:text-neutral-300 font-semibold truncate">{track.artist}</p>
-                            {downloads[track.id] && (
-                              <span className="flex-shrink-0 text-brand-primary" title="Descargado localmente">
-                                <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor"><circle cx="12" cy="12" r="9" fill="currentColor"/><path d="M12 7v8M12 15l-3-3M12 15l3-3" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" fill="none" className="text-bg-dark"/></svg>
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="text-xs text-text-secondary hidden md:block w-1/4 truncate">
-                          {track.album || "Sencillo"}
-                        </div>
-                        <span className="text-xs text-text-secondary hidden sm:block w-16 text-right mr-2">{formatTime(track.duration)}</span>
-                        <div className="flex items-center gap-2">
-                          <button 
-                            onClick={(e) => { 
-                              e.stopPropagation(); 
-                              if (currentTrack?.id === track.id) {
-                                togglePlay();
-                              } else {
-                                playTrack(track, tracks); 
-                              }
-                            }} 
-                            className="p-2 bg-brand-primary text-bg-dark rounded-full opacity-0 group-hover:opacity-100 transition shadow hover:scale-105"
-                          >
-                            {currentTrack?.id === track.id && isPlaying ? (
-                              <Pause className="w-3.5 h-3.5 fill-current" />
-                            ) : (
-                              <Play className="w-3.5 h-3.5 fill-current" />
-                            )}
-                          </button>
-                          <button 
-                            onClick={(e) => { e.stopPropagation(); openContextMenu(e, track.id); }} 
-                            className="p-2 text-text-secondary hover:text-brand-primary transition rounded-lg"
-                          >
-                            <MoreVertical className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )
+                        <RefreshCw className="w-3.5 h-3.5" />
+                        <span>Cargar más resultados</span>
+                      </button>
+                    </div>
+                  )}
+                </>
               ) : !loading && (
                 query.trim() === "" && (searchHistory.length > 0 || favorites.length > 0) ? (
                   <div className="animate-fade-in space-y-8">
@@ -4324,39 +4802,92 @@ function App() {
               ) : artistData ? (
                 <div className="space-y-8">
                   {artistData.sections && artistData.sections.map((section: any, idx: number) => {
-                    const mappedTracks = section.items.filter((item: any) => item.type === "song").map(convertYTItemToTrack);
+                    const mappedTracks = deduplicateTracks(
+                      section.items.filter((item: any) => item.type === "song").map(convertYTItemToTrack)
+                    );
+                    const seenItemKeys = new Set<string>();
+                    const dedupedSectionItems = (section.items || []).filter((item: any) => {
+                      if (item.type !== "song") return true;
+                      const key = normalizeTrackTitleKey(item.title);
+                      if (!key) return true;
+                      if (seenItemKeys.has(key)) return false;
+                      seenItemKeys.add(key);
+                      return true;
+                    });
                     return (
                       <div key={idx} className="space-y-4">
                         <div className="flex justify-between items-center">
                           <h3 className="text-lg font-bold text-brand-primary">{section.title}</h3>
-                          {mappedTracks.length > 0 && (
-                            <button 
-                              onClick={() => playShuffleQueue(mappedTracks)}
-                              className="text-xs font-semibold px-3 py-1.5 bg-white/5 hover:bg-white/10 rounded-lg flex items-center gap-1"
-                            >
-                              <Shuffle className="w-3 h-3" /> Reproducir Aleatorio
-                            </button>
-                          )}
+                          <div className="flex items-center gap-2">
+                            {mappedTracks.length > 0 && (
+                              <button
+                                onClick={() => {
+                                  if (showSelectionMode) {
+                                    setShowSelectionMode(false);
+                                    setSelectedTrackIds(new Set());
+                                  } else {
+                                    setShowSelectionMode(true);
+                                  }
+                                }}
+                                className={`px-2.5 py-1 rounded-lg text-xs font-semibold flex items-center gap-1 transition ${
+                                  showSelectionMode 
+                                    ? "bg-brand-primary text-bg-dark font-bold" 
+                                    : "bg-white/5 hover:bg-white/10 text-text-secondary hover:text-white"
+                                }`}
+                              >
+                                <CheckSquare className="w-3 h-3" />
+                                <span>{showSelectionMode ? "Cancelar" : "Seleccionar"}</span>
+                              </button>
+                            )}
+                            {mappedTracks.length > 0 && (
+                              <button 
+                                onClick={() => playShuffleQueue(mappedTracks)}
+                                className="text-xs font-semibold px-3 py-1.5 bg-white/5 hover:bg-white/10 rounded-lg flex items-center gap-1"
+                              >
+                                <Shuffle className="w-3 h-3" /> Reproducir Aleatorio
+                              </button>
+                            )}
+                          </div>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
-                          {section.items.map((item: any, i: number) => {
+                          {dedupedSectionItems.map((item: any, i: number) => {
                             if (item.type === "song") {
                               const track = convertYTItemToTrack(item);
                               return (
                                 <div 
                                   key={i}
                                   onClick={() => {
-                                    if (currentTrack?.id === track.id) {
+                                    if (showSelectionMode) {
+                                      handleSelectTrack(track.id);
+                                    } else if (currentTrack?.id === track.id) {
                                       setIsPlayerExpanded(true);
                                     } else {
                                       playTrack(track, mappedTracks);
                                     }
                                   }}
                                   onContextMenu={(e) => openContextMenu(e, track.id)}
-                                  className="flex items-center justify-between group cursor-pointer"
+                                  className={`flex items-center justify-between group cursor-pointer p-2 rounded-xl transition duration-150 ${
+                                    selectedTrackIds.has(track.id)
+                                      ? "bg-brand-primary/10 border border-brand-primary/40 shadow-sm"
+                                      : "hover:bg-white/5"
+                                  }`}
                                 >
                                   <div className="flex items-center gap-3 min-w-0 flex-1">
-                                    <SafeImage trackId={track.id} src={track.thumbnail} className="w-10 h-10 rounded-lg object-cover bg-black/40" alt={track.title} />
+                                    {showSelectionMode && (
+                                      <div 
+                                        onClick={(e) => { e.stopPropagation(); handleSelectTrack(track.id); }}
+                                        className={`w-5 h-5 rounded-full border-2 flex items-center justify-center cursor-pointer flex-shrink-0 transition-all ${
+                                          selectedTrackIds.has(track.id) 
+                                            ? "bg-brand-primary border-brand-primary" 
+                                            : "border-white/20 hover:border-brand-primary/60"
+                                        }`}
+                                      >
+                                        {selectedTrackIds.has(track.id) && (
+                                          <Check className="w-3 h-3 text-bg-dark stroke-[3]" />
+                                        )}
+                                      </div>
+                                    )}
+                                    <SafeImage trackId={track.id} src={track.thumbnail} className="w-10 h-10 rounded-lg object-cover bg-black/40 flex-shrink-0" alt={track.title} />
                                     <div className="min-w-0">
                                       <p className="font-semibold text-sm truncate">{track.title}</p>
                                       <p className="text-xs text-text-secondary truncate">{track.artist}</p>
@@ -4545,6 +5076,16 @@ function App() {
                           </div>
                         )}
                       </div>
+                    )}
+                    {libTab !== "downloads" && (
+                      <button 
+                        onClick={handleBatchDownload}
+                        disabled={isBatchDownloading}
+                        className="px-3 py-2 bg-brand-primary text-bg-dark text-xs font-semibold rounded-xl flex items-center gap-1.5 transition hover:scale-105 active:scale-95 disabled:opacity-50"
+                      >
+                        {isBatchDownloading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Download className="w-3.5 h-3.5" />}
+                        Descargar ({selectedTrackIds.size})
+                      </button>
                     )}
                     {libTab === "downloads" && (
                       <button 
@@ -5067,25 +5608,51 @@ function App() {
                         </div>
 
                         {/* Right Panel: Tracks list */}
-                        <div className="flex-1 min-w-0 w-full">
+                        <div className="flex-1 min-w-0 w-full space-y-3">
+                          <div className="flex items-center justify-between pb-1">
+                            <span className="text-xs text-text-secondary font-medium">Canciones ({playlist.tracks.length})</span>
+                            {playlist.tracks.length > 0 && (
+                              <button
+                                onClick={() => {
+                                  if (showSelectionMode) {
+                                    setShowSelectionMode(false);
+                                    setSelectedTrackIds(new Set());
+                                  } else {
+                                    setShowSelectionMode(true);
+                                  }
+                                }}
+                                className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition ${
+                                  showSelectionMode 
+                                    ? "bg-brand-primary text-bg-dark font-bold shadow" 
+                                    : "bg-white/5 hover:bg-white/10 text-text-secondary hover:text-white"
+                                }`}
+                              >
+                                <CheckSquare className="w-3.5 h-3.5" />
+                                <span>{showSelectionMode ? "Cancelar selección" : "Seleccionar"}</span>
+                              </button>
+                            )}
+                          </div>
                           {playlist.tracks.length > 0 ? (
                             <div className="flex flex-col gap-2 w-full">
                               {playlist.tracks.map((track, idx) => (
                                 <div 
                                   key={track.id}
-                                  draggable
+                                  draggable={!showSelectionMode}
                                   onDragStart={(e) => {
+                                    if (showSelectionMode) return;
                                     e.dataTransfer.effectAllowed = 'move';
                                     e.dataTransfer.setData('text/plain', String(idx));
                                     playlistDragRef.current = idx;
                                     setPlaylistDragIndex(idx);
                                   }}
                                   onDragOver={(e) => {
+                                    if (showSelectionMode) return;
                                     e.preventDefault();
                                     e.dataTransfer.dropEffect = 'move';
                                     setPlaylistDragOverIndex(idx);
                                   }}
                                   onDrop={(e) => {
+                                    if (showSelectionMode) return;
                                     e.preventDefault();
                                     e.stopPropagation();
                                     const startIdx = playlistDragRef.current;
@@ -5114,18 +5681,41 @@ function App() {
                                   }}
                                   onContextMenu={(e) => openContextMenu(e, track.id)}
                                   onClick={() => {
-                                    if (currentTrack?.id === track.id) {
+                                    if (showSelectionMode) {
+                                      handleSelectTrack(track.id);
+                                    } else if (currentTrack?.id === track.id) {
                                       setIsPlayerExpanded(true);
                                     } else {
                                       playTrack(track, playlist.tracks);
                                     }
                                   }}
                                   className={`flex items-center gap-4 p-3 rounded-xl transition duration-200 bg-surface-dark/30 hover:bg-surface-dark/70 border cursor-pointer group ${
-                                    currentTrack?.id === track.id ? "bg-brand-primary/10 border-brand-primary/20" : "border-white/5"
-                                  } ${playlistDragIndex === idx ? "dragging-queue-item" : ""} ${playlistDragOverIndex === idx ? "drag-over-queue-item" : ""}`}
+                                    selectedTrackIds.has(track.id)
+                                      ? "bg-brand-primary/10 border-brand-primary/40 shadow-sm"
+                                      : currentTrack?.id === track.id
+                                      ? "bg-brand-primary/10 border-brand-primary/20"
+                                      : "border-white/5"
+                                  } ${!showSelectionMode && playlistDragIndex === idx ? "dragging-queue-item" : ""} ${!showSelectionMode && playlistDragOverIndex === idx ? "drag-over-queue-item" : ""}`}
                                 >
-                                  <GripVertical className="w-4 h-4 text-text-secondary/30 drag-handle flex-shrink-0 cursor-grab" />
-                                  <span className="text-xs text-text-secondary w-5 text-right font-medium">{idx + 1}</span>
+                                  {!showSelectionMode && (
+                                    <GripVertical className="w-4 h-4 text-text-secondary/30 drag-handle flex-shrink-0 cursor-grab" />
+                                  )}
+                                  {showSelectionMode ? (
+                                    <div 
+                                      onClick={(e) => { e.stopPropagation(); handleSelectTrack(track.id); }}
+                                      className={`w-5 h-5 rounded-full border-2 flex items-center justify-center cursor-pointer mr-1 flex-shrink-0 transition-all ${
+                                        selectedTrackIds.has(track.id) 
+                                          ? "bg-brand-primary border-brand-primary" 
+                                          : "border-white/20 hover:border-brand-primary/60"
+                                      }`}
+                                    >
+                                      {selectedTrackIds.has(track.id) && (
+                                        <Check className="w-3 h-3 text-bg-dark stroke-[3]" />
+                                      )}
+                                    </div>
+                                  ) : (
+                                    <span className="text-xs text-text-secondary w-5 text-right font-medium">{idx + 1}</span>
+                                  )}
 <SafeImage trackId={track.id} src={track.thumbnail} className="w-11 h-11 rounded-lg object-cover shadow-md flex-shrink-0" alt={track.title} />
                                   <div className="min-w-0 flex-1">
                                     <p className={`font-semibold text-sm truncate ${currentTrack?.id === track.id ? "text-brand-primary" : "text-text-primary"}`}>{track.title}</p>
@@ -5242,14 +5832,36 @@ function App() {
                   <h2 className="text-2xl font-bold tracking-tight mb-2">Mis Favoritos</h2>
                   <p className="text-sm text-text-secondary">Tus canciones marcadas como favoritas.</p>
                 </div>
-                {favorites.length > 0 && (
-                  <button 
-                    onClick={() => playShuffleQueue(favorites)}
-                    className="px-4 py-2 bg-brand-primary text-bg-dark rounded-xl text-sm font-semibold flex items-center gap-1"
-                  >
-                    <Shuffle className="w-4 h-4" /> Reproducción Aleatoria
-                  </button>
-                )}
+                <div className="flex items-center gap-2">
+                  {favorites.length > 0 && (
+                    <button
+                      onClick={() => {
+                        if (showSelectionMode) {
+                          setShowSelectionMode(false);
+                          setSelectedTrackIds(new Set());
+                        } else {
+                          setShowSelectionMode(true);
+                        }
+                      }}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition ${
+                        showSelectionMode 
+                          ? "bg-brand-primary text-bg-dark font-bold shadow" 
+                          : "bg-white/5 hover:bg-white/10 text-text-secondary hover:text-white"
+                      }`}
+                    >
+                      <CheckSquare className="w-3.5 h-3.5" />
+                      <span>{showSelectionMode ? "Cancelar selección" : "Seleccionar"}</span>
+                    </button>
+                  )}
+                  {favorites.length > 0 && (
+                    <button 
+                      onClick={() => playShuffleQueue(favorites)}
+                      className="px-4 py-2 bg-brand-primary text-bg-dark rounded-xl text-sm font-semibold flex items-center gap-1"
+                    >
+                      <Shuffle className="w-4 h-4" /> Reproducción Aleatoria
+                    </button>
+                  )}
+                </div>
               </div>
 
               {favorites.length > 0 ? (
@@ -5258,13 +5870,38 @@ function App() {
                     <div 
                       key={track.id}
                       onContextMenu={(e) => openContextMenu(e, track.id)}
-                      onClick={() => playTrack(track, favorites)}
-                      className={`p-3.5 bg-surface-dark/30 hover:bg-surface-dark/70 rounded-xl flex items-center justify-between border border-white/5 w-full transition duration-150 cursor-pointer ${
-                        currentTrack?.id === track.id ? "bg-brand-primary/10 border-brand-primary/20" : ""
+                      onClick={() => {
+                        if (showSelectionMode) {
+                          handleSelectTrack(track.id);
+                        } else {
+                          playTrack(track, favorites);
+                        }
+                      }}
+                      className={`p-3.5 bg-surface-dark/30 hover:bg-surface-dark/70 rounded-xl flex items-center justify-between border cursor-pointer w-full transition duration-150 ${
+                        selectedTrackIds.has(track.id)
+                          ? "bg-brand-primary/10 border-brand-primary/40 shadow-sm"
+                          : currentTrack?.id === track.id
+                          ? "bg-brand-primary/10 border-brand-primary/20"
+                          : "border-white/5"
                       }`}
                     >
                       <div className="flex items-center gap-3 min-w-0 flex-1">
-                        <span className="text-xs text-text-secondary w-5 text-right font-medium">{idx + 1}</span>
+                        {showSelectionMode ? (
+                          <div 
+                            onClick={(e) => { e.stopPropagation(); handleSelectTrack(track.id); }}
+                            className={`w-5 h-5 rounded-full border-2 flex items-center justify-center cursor-pointer mr-1 flex-shrink-0 transition-all ${
+                              selectedTrackIds.has(track.id) 
+                                ? "bg-brand-primary border-brand-primary" 
+                                : "border-white/20 hover:border-brand-primary/60"
+                            }`}
+                          >
+                            {selectedTrackIds.has(track.id) && (
+                              <Check className="w-3.5 h-3.5 text-bg-dark stroke-[3]" />
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-text-secondary w-5 text-right font-medium">{idx + 1}</span>
+                        )}
                         <SafeImage trackId={track.id} src={track.thumbnail} className="w-11 h-11 rounded-lg object-cover shadow flex-shrink-0" alt={track.title} />
                         <div className="min-w-0 flex-1 ml-1">
                           <p className={`font-semibold text-sm truncate ${currentTrack?.id === track.id ? "text-brand-primary" : "text-text-primary"}`}>{track.title}</p>
@@ -5379,25 +6016,69 @@ function App() {
               </div>
 
               {/* Right Panel: Tracks list */}
-              <div className="flex-1 min-w-0 w-full">
+              <div className="flex-1 min-w-0 w-full space-y-3">
+                <div className="flex items-center justify-between pb-1">
+                  <span className="text-xs text-text-secondary font-medium">Canciones ({currentAlbumTracks.length})</span>
+                  {currentAlbumTracks.length > 0 && (
+                    <button
+                      onClick={() => {
+                        if (showSelectionMode) {
+                          setShowSelectionMode(false);
+                          setSelectedTrackIds(new Set());
+                        } else {
+                          setShowSelectionMode(true);
+                        }
+                      }}
+                      className={`px-3 py-1.5 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition ${
+                        showSelectionMode 
+                          ? "bg-brand-primary text-bg-dark font-bold shadow" 
+                          : "bg-white/5 hover:bg-white/10 text-text-secondary hover:text-white"
+                      }`}
+                    >
+                      <CheckSquare className="w-3.5 h-3.5" />
+                      <span>{showSelectionMode ? "Cancelar selección" : "Seleccionar"}</span>
+                    </button>
+                  )}
+                </div>
                 {currentAlbumTracks.length > 0 ? (
                   <div className="flex flex-col gap-2 w-full">
                     {currentAlbumTracks.map((track, idx) => (
                       <div
                         key={track.id}
                         onContextMenu={(e) => openContextMenu(e, track.id)}
-                        className={`flex items-center gap-4 p-3 rounded-xl transition duration-200 bg-surface-dark/30 hover:bg-surface-dark/70 border border-white/5 cursor-pointer group ${
-                          currentTrack?.id === track.id ? "bg-brand-primary/10 border-brand-primary/20" : "border-transparent"
+                        className={`flex items-center gap-4 p-3 rounded-xl transition duration-200 bg-surface-dark/30 hover:bg-surface-dark/70 border cursor-pointer group ${
+                          selectedTrackIds.has(track.id)
+                            ? "bg-brand-primary/10 border-brand-primary/40 shadow-sm"
+                            : currentTrack?.id === track.id
+                            ? "bg-brand-primary/10 border-brand-primary/20"
+                            : "border-white/5"
                         }`}
                         onClick={() => {
-                          if (currentTrack?.id === track.id) {
+                          if (showSelectionMode) {
+                            handleSelectTrack(track.id);
+                          } else if (currentTrack?.id === track.id) {
                             setIsPlayerExpanded(true);
                           } else {
                             playTrack(track, currentAlbumTracks);
                           }
                         }}
                       >
-                        <span className="text-xs text-text-secondary w-5 text-right font-medium">{idx + 1}</span>
+                        {showSelectionMode ? (
+                          <div 
+                            onClick={(e) => { e.stopPropagation(); handleSelectTrack(track.id); }}
+                            className={`w-5 h-5 rounded-full border-2 flex items-center justify-center cursor-pointer mr-1 flex-shrink-0 transition-all ${
+                              selectedTrackIds.has(track.id) 
+                                ? "bg-brand-primary border-brand-primary" 
+                                : "border-white/20 hover:border-brand-primary/60"
+                            }`}
+                          >
+                            {selectedTrackIds.has(track.id) && (
+                              <Check className="w-3.5 h-3.5 text-bg-dark stroke-[3]" />
+                            )}
+                          </div>
+                        ) : (
+                          <span className="text-xs text-text-secondary w-5 text-right font-medium">{idx + 1}</span>
+                        )}
                         <SafeImage trackId={track.id} src={track.thumbnail} className="w-11 h-11 rounded-lg object-cover shadow-md flex-shrink-0" alt={track.title} />
                         <div className="min-w-0 flex-1">
                           <p className={`font-semibold text-sm truncate ${currentTrack?.id === track.id ? "text-brand-primary" : "text-text-primary"}`}>{track.title}</p>
@@ -6732,9 +7413,24 @@ function App() {
           {/* DOWNLOAD MANAGER VIEW */}
           {activeTab === "download_manager" && (
             <div className="space-y-6 max-w-4xl animate-fade-in text-left">
-              <div>
-                <h2 className="text-2xl font-bold tracking-tight mb-2 text-white">Gestor de Descargas</h2>
-                <p className="text-sm text-text-secondary">Monitorea y gestiona tus descargas activas en tiempo real.</p>
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={() => {
+                    if (navIndex > 0) {
+                      goBack();
+                    } else {
+                      navigateTo("home");
+                    }
+                  }}
+                  className="p-2.5 rounded-2xl bg-white/5 hover:bg-white/10 text-text-secondary hover:text-white transition border border-white/5 shadow cursor-pointer group flex items-center justify-center flex-shrink-0"
+                  title="Volver a la vista anterior"
+                >
+                  <ChevronLeft className="w-5 h-5 group-hover:-translate-x-0.5 transition-transform" />
+                </button>
+                <div>
+                  <h2 className="text-2xl font-bold tracking-tight text-white">Gestor de Descargas</h2>
+                  <p className="text-sm text-text-secondary">Monitorea y gestiona tus descargas activas en tiempo real.</p>
+                </div>
               </div>
 
               <div className="bg-surface-dark/40 border border-white/5 rounded-2xl p-6 space-y-4">
@@ -7000,6 +7696,107 @@ function App() {
             )}
           </div>
         </footer>
+
+        {/* FLOATING BATCH ACTION TOOLBAR FOR GENERAL LISTS */}
+        {selectedTrackIds.size > 0 && (
+          <div className="fixed bottom-24 left-1/2 -translate-x-1/2 z-40 flex items-center gap-2.5 px-4 py-2.5 bg-surface-dark/95 backdrop-blur-2xl border border-brand-primary/30 rounded-2xl shadow-2xl shadow-black/80 animate-fade-in max-w-[95vw] overflow-x-auto">
+            <div className="flex items-center gap-2 pr-3 border-r border-white/10 flex-shrink-0">
+              <span className="w-5 h-5 rounded-full bg-brand-primary text-bg-dark flex items-center justify-center text-[11px] font-bold">
+                {selectedTrackIds.size}
+              </span>
+              <span className="text-xs font-semibold text-white whitespace-nowrap">
+                {selectedTrackIds.size === 1 ? "seleccionada" : "seleccionadas"}
+              </span>
+            </div>
+
+            <div className="flex items-center gap-2 flex-shrink-0">
+              <button
+                onClick={handleSelectAll}
+                className="px-2.5 py-1.5 bg-white/5 hover:bg-white/10 text-xs font-semibold text-text-primary rounded-xl flex items-center gap-1.5 transition whitespace-nowrap"
+                title="Seleccionar o deseleccionar todo"
+              >
+                <CheckSquare className="w-3.5 h-3.5" />
+                <span>
+                  {getCurrentViewTracks().length > 0 && getCurrentViewTracks().every(t => selectedTrackIds.has(t.id))
+                    ? "Deseleccionar"
+                    : "Todo"}
+                </span>
+              </button>
+
+              <button
+                onClick={handleBatchDownload}
+                disabled={isBatchDownloading}
+                className="px-3.5 py-1.5 bg-brand-primary hover:bg-brand-primary/90 text-bg-dark text-xs font-bold rounded-xl flex items-center gap-1.5 transition shadow-lg hover:scale-105 active:scale-95 disabled:opacity-50 whitespace-nowrap"
+                title="Descargar canciones seleccionadas en lote"
+              >
+                {isBatchDownloading ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <Download className="w-3.5 h-3.5" />
+                )}
+                <span>Descargar ({selectedTrackIds.size})</span>
+              </button>
+
+              {playlists.length > 0 && (
+                <div className="relative" ref={playlistDropdownRef}>
+                  <button
+                    onClick={() => setShowPlaylistDropdown(!showPlaylistDropdown)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-white/5 hover:bg-white/10 rounded-xl text-xs font-semibold text-text-primary transition whitespace-nowrap"
+                  >
+                    <ListPlus className="w-3.5 h-3.5" />
+                    <span>Playlist</span>
+                  </button>
+                  {showPlaylistDropdown && (
+                    <div className="absolute bottom-full mb-2 right-0 min-w-[200px] bg-surface-dark border border-white/10 rounded-xl shadow-2xl p-1 z-50 animate-fade-in">
+                      <div className="px-3 py-1.5 text-[10px] font-semibold text-text-secondary uppercase tracking-wider">Añadir a playlist</div>
+                      {playlists.map(p => (
+                        <button
+                          key={p.id}
+                          onClick={() => { handleBatchAddToPlaylist(p.id); setShowPlaylistDropdown(false); }}
+                          className="w-full flex items-center gap-2 px-3 py-2 text-xs text-text-primary hover:bg-white/5 rounded-lg transition text-left"
+                        >
+                          <ListMusic className="w-3.5 h-3.5 text-brand-primary flex-shrink-0" />
+                          <span className="truncate">{p.name}</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <button
+                onClick={handleBatchAddToFavorites}
+                className="px-2.5 py-1.5 bg-white/5 hover:bg-white/10 text-xs font-semibold text-text-primary rounded-xl flex items-center gap-1.5 transition whitespace-nowrap"
+                title="Añadir a favoritos"
+              >
+                <Heart className="w-3.5 h-3.5" />
+                <span>Favoritos</span>
+              </button>
+
+              {activeTab === "biblioteca" && libTab === "downloads" && (
+                <button
+                  onClick={handleBatchDelete}
+                  className="px-2.5 py-1.5 bg-red-500/15 hover:bg-red-500/25 text-red-400 text-xs font-semibold rounded-xl flex items-center gap-1.5 transition whitespace-nowrap"
+                  title="Eliminar archivos físicos"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  <span>Eliminar</span>
+                </button>
+              )}
+
+              <button
+                onClick={() => {
+                  setSelectedTrackIds(new Set());
+                  setShowSelectionMode(false);
+                }}
+                className="p-1.5 text-text-secondary hover:text-white rounded-lg hover:bg-white/10 transition ml-1"
+                title="Cerrar selección"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        )}
 
         {/* EXPANDED FULLSCREEN PLAYER */}
         {isPlayerExpanded && currentTrack && (

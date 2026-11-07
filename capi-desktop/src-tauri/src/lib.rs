@@ -949,6 +949,26 @@ async fn buscar_cancion(
 }
 
 #[tauri::command]
+async fn buscar_cancion_progresivo(
+    engine: tauri::State<'_, Arc<Engine>>,
+    query: String,
+    continuation: Option<String>,
+) -> Result<String, String> {
+    let page = if let Some(ctoken) = continuation.filter(|s| !s.trim().is_empty()) {
+        engine
+            .search_continuation(&ctoken)
+            .await
+            .map_err(|e| e.to_string())?
+    } else {
+        engine
+            .search_page(&query)
+            .await
+            .map_err(|e| e.to_string())?
+    };
+    serde_json::to_string(&page).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn obtener_stream(
     engine: tauri::State<'_, Arc<Engine>>,
     id: String,
@@ -969,12 +989,129 @@ async fn obtener_playlist(
     serde_json::to_string(&songs).map_err(|e| e.to_string())
 }
 
+fn sanitize_for_path(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .map(|c| {
+            if c == '/'
+                || c == '\\'
+                || c == ':'
+                || c == '*'
+                || c == '?'
+                || c == '"'
+                || c == '<'
+                || c == '>'
+                || c == '|'
+                || c.is_control()
+            {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+
+    let trimmed = cleaned.trim().trim_matches('.').trim();
+    if trimmed.is_empty() {
+        "Desconocido".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn extract_primary_artist(artist: &str, title: &str) -> String {
+    let raw_artist = artist.trim();
+
+    let is_unknown = raw_artist.is_empty()
+        || raw_artist.eq_ignore_ascii_case("desconocido")
+        || raw_artist.eq_ignore_ascii_case("artista desconocido")
+        || raw_artist.eq_ignore_ascii_case("unknown")
+        || raw_artist.eq_ignore_ascii_case("unknown artist")
+        || raw_artist.eq_ignore_ascii_case("youtube")
+        || raw_artist.eq_ignore_ascii_case("capi");
+
+    let candidate = if is_unknown {
+        if let Some((possible_artist, _)) = title.split_once(" - ") {
+            let p = possible_artist.trim();
+            if !p.is_empty() {
+                p
+            } else {
+                "Desconocido"
+            }
+        } else {
+            "Desconocido"
+        }
+    } else {
+        raw_artist
+    };
+
+    let mut primary = candidate;
+
+    // Split on comma first (standard for multiple artists tag e.g. "Rawayana, Danny Ocean")
+    if let Some((first, _)) = primary.split_once(',') {
+        let f = first.trim();
+        if !f.is_empty() {
+            primary = f;
+        }
+    }
+
+    // Split on semicolon
+    if let Some((first, _)) = primary.split_once(';') {
+        let f = first.trim();
+        if !f.is_empty() {
+            primary = f;
+        }
+    }
+
+    // Split on " / "
+    if let Some((first, _)) = primary.split_once(" / ") {
+        let f = first.trim();
+        if !f.is_empty() {
+            primary = f;
+        }
+    }
+
+    // Split on " & "
+    if let Some((first, _)) = primary.split_once(" & ") {
+        let f = first.trim();
+        if !f.is_empty() {
+            primary = f;
+        }
+    }
+
+    // Case-insensitive collaboration indicators
+    let lower = primary.to_lowercase();
+    let separators = [
+        " feat. ",
+        " feat ",
+        " ft. ",
+        " ft ",
+        " featuring ",
+        " with ",
+        " x ",
+        " vs. ",
+        " vs ",
+    ];
+    for sep in separators {
+        if let Some(pos) = lower.find(sep) {
+            let prefix = primary[..pos].trim();
+            if !prefix.is_empty() {
+                primary = prefix;
+                break;
+            }
+        }
+    }
+
+    sanitize_for_path(primary)
+}
+
 #[tauri::command]
 async fn descargar_cancion(
     app: tauri::AppHandle,
     track_id: String,
     title: String,
     artist: String,
+    primary_artist: Option<String>,
     url: String,
 ) -> Result<String, String> {
     let music_dir = app.path().app_data_dir().map_err(|e| {
@@ -990,33 +1127,15 @@ async fn descargar_cancion(
             .map_err(|e| format!("No se pudo crear el directorio de Capi: {}", e))?;
     }
 
-    let clean_title: String = title
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let clean_artist: String = {
-        let sanitized: String = artist
-            .chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect();
-        let trimmed = sanitized.trim();
-        if trimmed.is_empty() {
-            "Desconocido".to_string()
+    let clean_artist = if let Some(ref pa) = primary_artist {
+        let trimmed = pa.trim();
+        if !trimmed.is_empty() && !trimmed.eq_ignore_ascii_case("desconocido") {
+            sanitize_for_path(trimmed)
         } else {
-            trimmed.to_string()
+            extract_primary_artist(&artist, &title)
         }
+    } else {
+        extract_primary_artist(&artist, &title)
     };
 
     let artist_dir = capi_dir.join(&clean_artist);
@@ -1034,6 +1153,7 @@ async fn descargar_cancion(
         "webm"
     };
 
+    let clean_title = sanitize_for_path(&title);
     let filename = format!("{} - {}.{}", clean_artist, clean_title, ext);
     let dest_path = artist_dir.join(&filename);
     let part_path = artist_dir.join(format!("{}.part", filename));
@@ -2154,6 +2274,71 @@ fn seleccionar_carpeta() -> Option<String> {
     result.map(|path| path.to_string_lossy().into_owned())
 }
 
+fn scan_audio_files_recursive(
+    dir: &std::path::Path,
+    depth: usize,
+    max_depth: usize,
+    tracks: &mut Vec<LocalTrack>,
+) {
+    if depth > max_depth {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                scan_audio_files_recursive(&path, depth + 1, max_depth, tracks);
+            } else if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    let ext_lower = ext.to_lowercase();
+                    if ext_lower == "mp3"
+                        || ext_lower == "wav"
+                        || ext_lower == "m4a"
+                        || ext_lower == "ogg"
+                        || ext_lower == "flac"
+                        || ext_lower == "aac"
+                        || ext_lower == "webm"
+                    {
+                        let file_name = path
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("Audio Local")
+                            .to_string();
+
+                        let title = path
+                            .file_stem()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or(&file_name)
+                            .to_string();
+
+                        let artist = path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("Archivo Local")
+                            .to_string();
+
+                        let path_str = path.to_string_lossy().into_owned();
+                        let id = format!("local://{}", path_str);
+
+                        tracks.push(LocalTrack {
+                            id,
+                            title,
+                            artist: if artist == "Capi" || artist.is_empty() {
+                                "Archivo Local".to_string()
+                            } else {
+                                artist
+                            },
+                            thumbnail: "".to_string(),
+                            duration: 0,
+                        });
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[tauri::command]
 fn listar_archivos_locales(
     ruta: String,
@@ -2168,48 +2353,104 @@ fn listar_archivos_locales(
     }
 
     let mut tracks = Vec::new();
-    let entries = std::fs::read_dir(dir_path).map_err(|e| e.to_string())?;
+    scan_audio_files_recursive(dir_path, 0, 3, &mut tracks);
+
+    Ok(tracks)
+}
+
+#[tauri::command]
+async fn consolidar_carpetas_descargas(
+    app: tauri::AppHandle,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    let music_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let capi_dir = music_dir.join("Capi");
+    if !capi_dir.exists() || !capi_dir.is_dir() {
+        return Ok(std::collections::HashMap::new());
+    }
+
+    let mut path_mappings = std::collections::HashMap::new();
+
+    let entries = match std::fs::read_dir(&capi_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(path_mappings),
+    };
 
     for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_file() {
-            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                let ext_lower = ext.to_lowercase();
-                if ext_lower == "mp3"
-                    || ext_lower == "wav"
-                    || ext_lower == "m4a"
-                    || ext_lower == "ogg"
-                    || ext_lower == "flac"
-                    || ext_lower == "aac"
-                {
-                    let file_name = path
-                        .file_name()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or("Audio Local")
-                        .to_string();
+        let entry_path = entry.path();
+        if !entry_path.is_dir() {
+            continue;
+        }
+        let dir_name = entry.file_name().to_string_lossy().into_owned();
+        if dir_name == "cache" || dir_name == "engine" {
+            continue;
+        }
 
-                    let title = path
-                        .file_stem()
-                        .and_then(|n| n.to_str())
-                        .unwrap_or(&file_name)
-                        .to_string();
-
-                    let path_str = path.to_string_lossy().into_owned();
-                    let id = format!("local://{}", path_str);
-
-                    tracks.push(LocalTrack {
-                        id,
-                        title,
-                        artist: "Archivo Local".to_string(),
-                        thumbnail: "".to_string(),
-                        duration: 0,
-                    });
+        // 1. Move any files in sub-subfolders up (e.g. Capi/Rawayana/Rawayana_ Danny Ocean/file.m4a -> Capi/Rawayana/file.m4a)
+        if let Ok(sub_entries) = std::fs::read_dir(&entry_path) {
+            for sub_entry in sub_entries.flatten() {
+                let sub_path = sub_entry.path();
+                if sub_path.is_dir() {
+                    if let Ok(sub_files) = std::fs::read_dir(&sub_path) {
+                        for sub_file in sub_files.flatten() {
+                            let old_file_path = sub_file.path();
+                            if old_file_path.is_file() {
+                                let file_name = sub_file.file_name();
+                                let target_file_path = entry_path.join(&file_name);
+                                if !target_file_path.exists() {
+                                    if std::fs::rename(&old_file_path, &target_file_path).is_ok() {
+                                        path_mappings.insert(
+                                            old_file_path.to_string_lossy().into_owned(),
+                                            target_file_path.to_string_lossy().into_owned(),
+                                        );
+                                    }
+                                } else {
+                                    path_mappings.insert(
+                                        old_file_path.to_string_lossy().into_owned(),
+                                        target_file_path.to_string_lossy().into_owned(),
+                                    );
+                                    let _ = std::fs::remove_file(&old_file_path);
+                                }
+                            }
+                        }
+                    }
+                    let _ = std::fs::remove_dir(&sub_path);
                 }
             }
         }
+
+        // 2. Check if this directory itself is a collaboration directory (e.g. "ELENA ROSE_ Rawayana")
+        let primary_name = extract_primary_artist(&dir_name, "");
+        if primary_name != dir_name && primary_name != "Desconocido" {
+            let target_artist_dir = capi_dir.join(&primary_name);
+            let _ = std::fs::create_dir_all(&target_artist_dir);
+            if let Ok(files) = std::fs::read_dir(&entry_path) {
+                for file_entry in files.flatten() {
+                    let old_file_path = file_entry.path();
+                    if old_file_path.is_file() {
+                        let file_name = file_entry.file_name();
+                        let target_file_path = target_artist_dir.join(&file_name);
+                        if !target_file_path.exists() {
+                            if std::fs::rename(&old_file_path, &target_file_path).is_ok() {
+                                path_mappings.insert(
+                                    old_file_path.to_string_lossy().into_owned(),
+                                    target_file_path.to_string_lossy().into_owned(),
+                                );
+                            }
+                        } else {
+                            path_mappings.insert(
+                                old_file_path.to_string_lossy().into_owned(),
+                                target_file_path.to_string_lossy().into_owned(),
+                            );
+                            let _ = std::fs::remove_file(&old_file_path);
+                        }
+                    }
+                }
+            }
+            let _ = std::fs::remove_dir(&entry_path);
+        }
     }
 
-    Ok(tracks)
+    Ok(path_mappings)
 }
 
 #[tauri::command]
@@ -2507,6 +2748,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             buscar_cancion,
+            buscar_cancion_progresivo,
             obtener_stream,
             obtener_playlist,
             descargar_cancion,
@@ -2529,7 +2771,8 @@ pub fn run() {
             media_update_state,
             media_get_state,
             descubrir_dispositivos_cast,
-            transmitir_a_dispositivo
+            transmitir_a_dispositivo,
+            consolidar_carpetas_descargas
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -2538,6 +2781,52 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primary_artist_extraction_and_sanitization() {
+        assert_eq!(
+            extract_primary_artist("Rawayana, Danny Ocean", "Binikini"),
+            "Rawayana"
+        );
+        assert_eq!(
+            extract_primary_artist("Rawayana, Carín León, Grupo Frontera", "Como De Sol A Sol"),
+            "Rawayana"
+        );
+        assert_eq!(
+            extract_primary_artist("Rawayana & Danny Ocean", "Binikini"),
+            "Rawayana"
+        );
+        assert_eq!(
+            extract_primary_artist("Rawayana feat. Danny Ocean", "Binikini"),
+            "Rawayana"
+        );
+        assert_eq!(
+            extract_primary_artist("Rawayana ft. Danny Ocean", "Binikini"),
+            "Rawayana"
+        );
+        assert_eq!(
+            extract_primary_artist("Rawayana / Danny Ocean", "Binikini"),
+            "Rawayana"
+        );
+        assert_eq!(
+            extract_primary_artist("Rawayana; Danny Ocean", "Binikini"),
+            "Rawayana"
+        );
+        assert_eq!(
+            extract_primary_artist("ELENA ROSE, Rawayana", "Luna de Miel"),
+            "ELENA ROSE"
+        );
+        assert_eq!(
+            extract_primary_artist("Artista Desconocido", "Queen - Bohemian Rhapsody"),
+            "Queen"
+        );
+        assert_eq!(extract_primary_artist("", "Coldplay - Yellow"), "Coldplay");
+        assert_eq!(extract_primary_artist("AC/DC", "Back In Black"), "AC_DC");
+        assert_eq!(
+            extract_primary_artist("Guns N' Roses", "Sweet Child O' Mine"),
+            "Guns N' Roses"
+        );
+    }
 
     #[test]
     fn token_validation_requires_exact_match() {

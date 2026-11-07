@@ -7,6 +7,7 @@ pub struct Song {
     pub id: String,
     pub title: String,
     pub artist: String,
+    pub primary_artist: Option<String>,
     pub album: Option<String>,
     pub duration: Option<u32>,
     pub thumbnail: Option<String>,
@@ -103,6 +104,13 @@ pub struct StreamInfo {
     pub bitrate: u32,
     pub itag: u32,
     pub codec: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchPage {
+    pub songs: Vec<Song>,
+    pub continuation: Option<String>,
 }
 
 /// Forma de error que espera el frontend actual (`ErrorDTO`).

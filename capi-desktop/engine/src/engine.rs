@@ -11,7 +11,7 @@ use crate::error::EngineError;
 use crate::lyrics;
 use crate::models::{
     ArtistPage, ArtistSection, ExploreResponse, HomeResponse, HomeSection, LyricsResult, MoodGenre,
-    Song, StreamInfo, YtItem,
+    SearchPage, Song, StreamInfo, YtItem,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(12);
@@ -119,6 +119,72 @@ impl Engine {
         Ok(songs)
     }
 
+    pub async fn search_page(&self, query: &str) -> Result<SearchPage, EngineError> {
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(SearchPage {
+                songs: Vec::new(),
+                continuation: None,
+            });
+        }
+
+        let result = self
+            .with_timeout(self.rp.query().music_search_tracks(query))
+            .await?;
+        let songs: Vec<Song> = result.items.items.iter().map(song_from_track).collect();
+
+        let continuation = result.items.ctoken.map(|ctoken| {
+            if let Some(ref vd) = result.items.visitor_data {
+                format!("{ctoken}:::{vd}")
+            } else {
+                ctoken
+            }
+        });
+
+        Ok(SearchPage {
+            songs,
+            continuation,
+        })
+    }
+
+    pub async fn search_continuation(
+        &self,
+        continuation_str: &str,
+    ) -> Result<SearchPage, EngineError> {
+        let (ctoken, visitor_data) = match continuation_str.split_once(":::") {
+            Some((c, v)) => (c, Some(v)),
+            None => (continuation_str, None),
+        };
+
+        let page = self
+            .with_timeout(
+                self.rp
+                    .query()
+                    .continuation::<rustypipe::model::TrackItem, _>(
+                        ctoken,
+                        rustypipe::model::paginator::ContinuationEndpoint::MusicSearch,
+                        visitor_data,
+                    ),
+            )
+            .await?;
+
+        let songs: Vec<Song> = page.items.iter().map(song_from_track).collect();
+        let next_continuation = page.ctoken.map(|next_ctoken| {
+            if let Some(ref vd) = page.visitor_data {
+                format!("{next_ctoken}:::{vd}")
+            } else if let Some(vd) = visitor_data {
+                format!("{next_ctoken}:::{vd}")
+            } else {
+                next_ctoken
+            }
+        });
+
+        Ok(SearchPage {
+            songs,
+            continuation: next_continuation,
+        })
+    }
+
     pub async fn album_tracks(&self, album_id: &str) -> Result<Vec<Song>, EngineError> {
         let album = self
             .with_timeout(self.rp.query().music_album(strip_vl(album_id)))
@@ -155,12 +221,27 @@ impl Engine {
 
         let mut sections = Vec::new();
         if !artist.tracks.is_empty() {
-            sections.push(ArtistSection {
-                title: "Canciones populares".into(),
-                items: artist.tracks.iter().take(12).map(yt_from_track).collect(),
-                browse_id: None,
-                params: None,
-            });
+            let mut seen_titles = std::collections::HashSet::new();
+            let mut unique_tracks = Vec::new();
+
+            for track in &artist.tracks {
+                let key = normalize_track_title_key(&track.name);
+                if key.is_empty() || seen_titles.insert(key) {
+                    unique_tracks.push(yt_from_track(track));
+                }
+                if unique_tracks.len() >= 20 {
+                    break;
+                }
+            }
+
+            if !unique_tracks.is_empty() {
+                sections.push(ArtistSection {
+                    title: "Canciones populares".into(),
+                    items: unique_tracks,
+                    browse_id: None,
+                    params: None,
+                });
+            }
         }
         if !artist.albums.is_empty() {
             sections.push(ArtistSection {
@@ -674,6 +755,7 @@ fn select_visionos_stream(json: &Value) -> Result<StreamInfo, EngineError> {
 }
 
 pub(crate) fn song_from_track(track: &TrackItem) -> Song {
+    let primary_artist = track.artists.first().map(|a| a.name.clone());
     let artist = if track.artists.is_empty() {
         "Artista Desconocido".to_string()
     } else {
@@ -693,6 +775,7 @@ pub(crate) fn song_from_track(track: &TrackItem) -> Song {
         id: track.id.clone(),
         title: track.name.clone(),
         artist,
+        primary_artist,
         album: track.album.as_ref().map(|a| a.name.clone()),
         duration: track.duration,
         thumbnail: best_thumbnail(&track.cover).or_else(|| {
@@ -755,6 +838,52 @@ pub(crate) fn yt_from_artist(artist: &ArtistItem) -> YtItem {
         browse_id: Some(artist.id.clone()),
         author: None,
     }
+}
+
+pub(crate) fn normalize_track_title_key(title: &str) -> String {
+    let lower = title.to_lowercase();
+    let mut res = String::with_capacity(lower.len());
+    let mut depth = 0;
+    for c in lower.chars() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => {
+                if depth > 0 {
+                    depth -= 1;
+                }
+            }
+            _ => {
+                if depth == 0 {
+                    res.push(c);
+                }
+            }
+        }
+    }
+    let base = if let Some((head, tail)) = res.split_once(" - ") {
+        let t = tail.trim();
+        if t.starts_with("official")
+            || t.starts_with("video")
+            || t.starts_with("audio")
+            || t.starts_with("lyric")
+            || t.starts_with("letra")
+            || t.starts_with("en vivo")
+            || t.starts_with("live")
+            || t.starts_with("remaster")
+            || t.starts_with("single")
+        {
+            head
+        } else {
+            &res
+        }
+    } else {
+        &res
+    };
+
+    let cleaned: String = base
+        .chars()
+        .filter(|c| c.is_alphanumeric() || c.is_whitespace())
+        .collect();
+    cleaned.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 pub(crate) fn yt_from_track(track: &TrackItem) -> YtItem {
