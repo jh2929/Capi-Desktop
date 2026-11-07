@@ -2381,7 +2381,12 @@ async fn consolidar_carpetas_descargas(
             continue;
         }
         let dir_name = entry.file_name().to_string_lossy().into_owned();
-        if dir_name == "cache" || dir_name == "engine" {
+        if dir_name == "cache"
+            || dir_name == "engine"
+            || dir_name == "rock"
+            || dir_name == "ingles"
+            || dir_name == "recientes"
+        {
             continue;
         }
 
