@@ -484,6 +484,12 @@ function App() {
             if (mappings[oldPath]) {
               copy[trackId] = mappings[oldPath];
               changed = true;
+            } else {
+              const filename = oldPath.split("/").pop();
+              if (filename && mappings[filename]) {
+                copy[trackId] = mappings[filename];
+                changed = true;
+              }
             }
           }
           if (changed) {
@@ -2467,7 +2473,9 @@ function App() {
         streamSource = "download";
         diagnostics.onStreamResolveStarted(streamSource);
         const path = downloads[track.id];
-        stream = `http://127.0.0.1:${activePort}/play?path=${encodeURIComponent(path)}&token=${activeToken}`;
+        const titleParam = encodeURIComponent(track.title || "");
+        const artistParam = encodeURIComponent(track.artist || "");
+        stream = `http://127.0.0.1:${activePort}/play?path=${encodeURIComponent(path)}&title=${titleParam}&artist=${artistParam}&token=${activeToken}`;
         console.timeLog(`[PLAY-TIMING] ${track.title}`, 'using downloaded file');
       } else if (isCachedValid && cachedEntry) {
         streamSource = "cache";

@@ -45,6 +45,148 @@ impl LocalRoots {
             .map(|roots| roots.iter().any(|root| path.starts_with(root)))
             .unwrap_or(false)
     }
+
+    fn get_all(&self) -> Vec<PathBuf> {
+        self.0.lock().map(|roots| roots.clone()).unwrap_or_default()
+    }
+}
+
+fn normalize_for_loose_match(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+fn find_audio_file_recursive(
+    dir: &std::path::Path,
+    target_filename: Option<&std::ffi::OsStr>,
+    target_stem: Option<&std::ffi::OsStr>,
+    title_hint: Option<&str>,
+    _artist_hint: Option<&str>,
+    depth: usize,
+    max_depth: usize,
+) -> Option<std::path::PathBuf> {
+    if depth > max_depth {
+        return None;
+    }
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut subdirs = Vec::new();
+
+    let target_fname_str = target_filename.map(|f| f.to_string_lossy().to_string());
+    let target_stem_str = target_stem.map(|f| f.to_string_lossy().to_string());
+    let target_norm = target_stem_str.as_deref().map(normalize_for_loose_match);
+    let title_norm = title_hint
+        .map(normalize_for_loose_match)
+        .filter(|s| !s.is_empty());
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                let ext_lower = ext.to_lowercase();
+                if matches!(
+                    ext_lower.as_str(),
+                    "mp3" | "m4a" | "webm" | "opus" | "wav" | "flac" | "ogg" | "aac"
+                ) {
+                    let entry_fname = entry.file_name();
+                    let entry_fname_str = entry_fname.to_string_lossy();
+
+                    // 1. Exact filename match
+                    if let Some(ref target) = target_fname_str {
+                        if entry_fname_str == *target
+                            || entry_fname_str.eq_ignore_ascii_case(target)
+                        {
+                            return Some(path);
+                        }
+                    }
+
+                    // 2. Stem match (ignoring extension / case)
+                    if let Some(entry_stem) = path.file_stem().and_then(|s| s.to_str()) {
+                        if let Some(ref stem) = target_stem_str {
+                            if entry_stem == *stem || entry_stem.eq_ignore_ascii_case(stem) {
+                                return Some(path);
+                            }
+                        }
+
+                        // 3. Normalized alphanumeric match
+                        let entry_norm = normalize_for_loose_match(entry_stem);
+                        if let Some(ref t_norm) = target_norm {
+                            if !t_norm.is_empty()
+                                && (entry_norm == *t_norm
+                                    || entry_norm.contains(t_norm)
+                                    || t_norm.contains(&entry_norm))
+                            {
+                                return Some(path);
+                            }
+                        }
+
+                        // 4. Title hint match
+                        if let Some(ref t_title) = title_norm {
+                            if entry_norm.contains(t_title) {
+                                return Some(path);
+                            }
+                        }
+                    }
+                }
+            }
+        } else if path.is_dir() {
+            let dir_name = entry.file_name();
+            let name_str = dir_name.to_string_lossy();
+            if name_str != "cache" && name_str != "engine" && !name_str.starts_with('.') {
+                subdirs.push(path);
+            }
+        }
+    }
+
+    for subdir in subdirs {
+        if let Some(found) = find_audio_file_recursive(
+            &subdir,
+            target_filename,
+            target_stem,
+            title_hint,
+            _artist_hint,
+            depth + 1,
+            max_depth,
+        ) {
+            return Some(found);
+        }
+    }
+
+    None
+}
+
+fn collect_all_audio_files_recursive(
+    dir: &std::path::Path,
+    depth: usize,
+    max_depth: usize,
+    files: &mut Vec<std::path::PathBuf>,
+) {
+    if depth > max_depth {
+        return;
+    }
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    let ext_lower = ext.to_lowercase();
+                    if matches!(
+                        ext_lower.as_str(),
+                        "mp3" | "m4a" | "webm" | "opus" | "wav" | "flac" | "ogg" | "aac"
+                    ) {
+                        files.push(path);
+                    }
+                }
+            } else if path.is_dir() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str != "cache" && name_str != "engine" && !name_str.starts_with('.') {
+                    collect_all_audio_files_recursive(&path, depth + 1, max_depth, files);
+                }
+            }
+        }
+    }
 }
 
 pub struct DiscordState {
@@ -767,12 +909,65 @@ Vary: Origin\r\n",
                             }
                             return;
                         } else if let Some((_, rest)) = path_and_query.split_once("path=") {
-                            let encoded_path = rest.split("&token=").next().unwrap_or("");
+                            let encoded_path = rest.split('&').next().unwrap_or(rest);
                             let decoded_str = match urlencoding::decode(encoded_path) {
                                 Ok(d) => d.into_owned(),
                                 Err(_) => encoded_path.to_string(),
                             };
-                            let file_path = std::path::Path::new(&decoded_str);
+
+                            let param_title = path_and_query
+                                .split("title=")
+                                .nth(1)
+                                .and_then(|s| s.split('&').next())
+                                .and_then(|s| urlencoding::decode(s).ok())
+                                .map(|s| s.into_owned());
+                            let param_artist = path_and_query
+                                .split("artist=")
+                                .nth(1)
+                                .and_then(|s| s.split('&').next())
+                                .and_then(|s| urlencoding::decode(s).ok())
+                                .map(|s| s.into_owned());
+
+                            let initial_path = std::path::PathBuf::from(&decoded_str);
+                            let mut resolved_path = initial_path.clone();
+                            let mut exists = resolved_path.is_file();
+
+                            // Si la ruta exacta no existe en disco, buscar recursivamente en Capi y en raíces locales (hasta 15 niveles de profundidad)
+                            if !exists {
+                                let target_filename = initial_path.file_name();
+                                let target_stem = initial_path.file_stem();
+
+                                if let Some(found) = find_audio_file_recursive(
+                                    &capi_dir_check,
+                                    target_filename,
+                                    target_stem,
+                                    param_title.as_deref(),
+                                    param_artist.as_deref(),
+                                    0,
+                                    15,
+                                ) {
+                                    resolved_path = found;
+                                    exists = true;
+                                } else {
+                                    for root_dir in roots.get_all() {
+                                        if let Some(found) = find_audio_file_recursive(
+                                            &root_dir,
+                                            target_filename,
+                                            target_stem,
+                                            param_title.as_deref(),
+                                            param_artist.as_deref(),
+                                            0,
+                                            15,
+                                        ) {
+                                            resolved_path = found;
+                                            exists = true;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+
+                            let file_path = resolved_path.as_path();
                             let is_audio_ext = file_path
                                 .extension()
                                 .and_then(|ext| ext.to_str())
@@ -784,6 +979,8 @@ Vary: Origin\r\n",
                                         || ext_lower == "m4a"
                                         || ext_lower == "flac"
                                         || ext_lower == "aac"
+                                        || ext_lower == "webm"
+                                        || ext_lower == "opus"
                                 })
                                 .unwrap_or(false);
                             let canonical = std::fs::canonicalize(file_path).ok();
@@ -793,10 +990,8 @@ Vary: Origin\r\n",
                                     path.starts_with(&capi_dir_check) || roots.contains(path)
                                 })
                                 .unwrap_or(false);
-                            let is_allowed = file_path.exists()
-                                && file_path.is_file()
-                                && is_audio_ext
-                                && under_root;
+                            let is_allowed =
+                                exists && file_path.is_file() && is_audio_ext && under_root;
                             if is_allowed {
                                 if let Ok(mut file) = File::open(file_path) {
                                     let file_size = match file.metadata() {
@@ -874,6 +1069,8 @@ Vary: Origin\r\n",
                                         "ogg" => "audio/ogg",
                                         "flac" => "audio/flac",
                                         "aac" => "audio/aac",
+                                        "webm" => "audio/webm",
+                                        "opus" => "audio/opus",
                                         _ => "application/octet-stream",
                                     };
 
@@ -2298,6 +2495,7 @@ fn scan_audio_files_recursive(
                         || ext_lower == "flac"
                         || ext_lower == "aac"
                         || ext_lower == "webm"
+                        || ext_lower == "opus"
                     {
                         let file_name = path
                             .file_name()
@@ -2353,7 +2551,7 @@ fn listar_archivos_locales(
     }
 
     let mut tracks = Vec::new();
-    scan_audio_files_recursive(dir_path, 0, 3, &mut tracks);
+    scan_audio_files_recursive(dir_path, 0, 15, &mut tracks);
 
     Ok(tracks)
 }
@@ -2370,88 +2568,63 @@ async fn consolidar_carpetas_descargas(
 
     let mut path_mappings = std::collections::HashMap::new();
 
-    let entries = match std::fs::read_dir(&capi_dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(path_mappings),
-    };
-
-    for entry in entries.flatten() {
-        let entry_path = entry.path();
-        if !entry_path.is_dir() {
-            continue;
-        }
-        let dir_name = entry.file_name().to_string_lossy().into_owned();
-        if dir_name == "cache"
-            || dir_name == "engine"
-            || dir_name == "rock"
-            || dir_name == "ingles"
-            || dir_name == "recientes"
-        {
-            continue;
-        }
-
-        // 1. Move any files in sub-subfolders up (e.g. Capi/Rawayana/Rawayana_ Danny Ocean/file.m4a -> Capi/Rawayana/file.m4a)
-        if let Ok(sub_entries) = std::fs::read_dir(&entry_path) {
-            for sub_entry in sub_entries.flatten() {
-                let sub_path = sub_entry.path();
-                if sub_path.is_dir() {
-                    if let Ok(sub_files) = std::fs::read_dir(&sub_path) {
-                        for sub_file in sub_files.flatten() {
-                            let old_file_path = sub_file.path();
-                            if old_file_path.is_file() {
-                                let file_name = sub_file.file_name();
-                                let target_file_path = entry_path.join(&file_name);
-                                if !target_file_path.exists() {
-                                    if std::fs::rename(&old_file_path, &target_file_path).is_ok() {
-                                        path_mappings.insert(
-                                            old_file_path.to_string_lossy().into_owned(),
-                                            target_file_path.to_string_lossy().into_owned(),
-                                        );
-                                    }
-                                } else {
-                                    path_mappings.insert(
-                                        old_file_path.to_string_lossy().into_owned(),
-                                        target_file_path.to_string_lossy().into_owned(),
-                                    );
-                                    let _ = std::fs::remove_file(&old_file_path);
-                                }
-                            }
-                        }
-                    }
-                    let _ = std::fs::remove_dir(&sub_path);
-                }
-            }
-        }
-
-        // 2. Check if this directory itself is a collaboration directory (e.g. "ELENA ROSE_ Rawayana")
-        let primary_name = extract_primary_artist(&dir_name, "");
-        if primary_name != dir_name && primary_name != "Desconocido" {
-            let target_artist_dir = capi_dir.join(&primary_name);
-            let _ = std::fs::create_dir_all(&target_artist_dir);
-            if let Ok(files) = std::fs::read_dir(&entry_path) {
-                for file_entry in files.flatten() {
-                    let old_file_path = file_entry.path();
-                    if old_file_path.is_file() {
-                        let file_name = file_entry.file_name();
-                        let target_file_path = target_artist_dir.join(&file_name);
-                        if !target_file_path.exists() {
-                            if std::fs::rename(&old_file_path, &target_file_path).is_ok() {
+    // 1. Mover archivos sueltos en la raíz de Capi a la carpeta de su artista correspondiente
+    if let Ok(entries) = std::fs::read_dir(&capi_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() {
+                if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
+                    let ext_lower = ext.to_lowercase();
+                    if matches!(
+                        ext_lower.as_str(),
+                        "mp3" | "m4a" | "webm" | "opus" | "wav" | "flac" | "ogg" | "aac"
+                    ) {
+                        let file_name = entry.file_name();
+                        let file_name_str = file_name.to_string_lossy();
+                        let primary = extract_primary_artist(&file_name_str, "");
+                        let target_dir = if !primary.is_empty() && primary != "Desconocido" {
+                            capi_dir.join(&primary)
+                        } else {
+                            capi_dir.join("Desconocido")
+                        };
+                        let _ = std::fs::create_dir_all(&target_dir);
+                        let target_path = target_dir.join(&file_name);
+                        let old_path_str = path.to_string_lossy().to_string();
+                        if !target_path.exists() {
+                            if std::fs::rename(&path, &target_path).is_ok() {
                                 path_mappings.insert(
-                                    old_file_path.to_string_lossy().into_owned(),
-                                    target_file_path.to_string_lossy().into_owned(),
+                                    old_path_str,
+                                    target_path.to_string_lossy().to_string(),
                                 );
                             }
                         } else {
-                            path_mappings.insert(
-                                old_file_path.to_string_lossy().into_owned(),
-                                target_file_path.to_string_lossy().into_owned(),
-                            );
-                            let _ = std::fs::remove_file(&old_file_path);
+                            path_mappings
+                                .insert(old_path_str, target_path.to_string_lossy().to_string());
+                            let _ = std::fs::remove_file(&path);
                         }
                     }
                 }
             }
-            let _ = std::fs::remove_dir(&entry_path);
+        }
+    }
+
+    // 2. Indexar recursivamente todos los archivos de audio en Capi (hasta 15 niveles) para mapear rutas antiguas y nombres de archivo
+    let mut all_files = Vec::new();
+    collect_all_audio_files_recursive(&capi_dir, 0, 15, &mut all_files);
+
+    for actual_path in all_files {
+        if let Some(file_name) = actual_path.file_name() {
+            let file_name_str = file_name.to_string_lossy().to_string();
+            let actual_path_str = actual_path.to_string_lossy().to_string();
+
+            // Mapear la ruta antigua al estilo raíz: Capi/Cancion.m4a -> Capi/.../Cancion.m4a
+            let old_root_path = capi_dir.join(file_name).to_string_lossy().to_string();
+            if old_root_path != actual_path_str {
+                path_mappings.insert(old_root_path, actual_path_str.clone());
+            }
+
+            // Mapear también por nombre simple de archivo
+            path_mappings.insert(file_name_str, actual_path_str);
         }
     }
 
@@ -2898,5 +3071,65 @@ mod tests {
         assert!(!roots.contains(&canonical));
         assert!(roots.allow(&canonical));
         assert!(roots.contains(&canonical));
+    }
+
+    #[test]
+    fn find_audio_file_recursive_nested_10_folders_deep() {
+        let temp_base = std::env::temp_dir().join(format!(
+            "capi_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut deep_dir = temp_base.clone();
+        for i in 1..=10 {
+            deep_dir = deep_dir.join(format!("level_{}", i));
+        }
+        std::fs::create_dir_all(&deep_dir).unwrap();
+        let test_song = deep_dir.join("The Weeknd_ Justice - Wake Me Up.m4a");
+        std::fs::write(&test_song, b"dummy audio").unwrap();
+
+        // 1. Find by exact filename
+        let found = find_audio_file_recursive(
+            &temp_base,
+            Some(std::ffi::OsStr::new("The Weeknd_ Justice - Wake Me Up.m4a")),
+            Some(std::ffi::OsStr::new("The Weeknd_ Justice - Wake Me Up")),
+            None,
+            None,
+            0,
+            15,
+        );
+        assert!(found.is_some());
+        assert_eq!(
+            found.unwrap().canonicalize().unwrap(),
+            test_song.canonicalize().unwrap()
+        );
+
+        // 2. Find by stem match with different extension (e.g. .mp3 requested)
+        let found_stem = find_audio_file_recursive(
+            &temp_base,
+            Some(std::ffi::OsStr::new("The Weeknd_ Justice - Wake Me Up.mp3")),
+            Some(std::ffi::OsStr::new("The Weeknd_ Justice - Wake Me Up")),
+            None,
+            None,
+            0,
+            15,
+        );
+        assert!(found_stem.is_some());
+
+        // 3. Find by title hint
+        let found_title = find_audio_file_recursive(
+            &temp_base,
+            None,
+            None,
+            Some("Wake Me Up"),
+            Some("The Weeknd"),
+            0,
+            15,
+        );
+        assert!(found_title.is_some());
+
+        let _ = std::fs::remove_dir_all(&temp_base);
     }
 }
