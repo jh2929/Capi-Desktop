@@ -7,9 +7,11 @@ pub mod engine;
 pub mod error;
 pub mod lyrics;
 pub mod models;
+pub mod ytm;
 
 pub use engine::Engine;
 pub use error::EngineError;
 pub use models::*;
+pub use ytm::*;
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");

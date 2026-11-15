@@ -437,3 +437,79 @@ body {
 .cast-active-pulse {
   animation: castPulse 2s infinite cubic-bezier(0.66, 0, 0, 1);
 }
+
+/* ═══════════════════════════════════════════════════════════════
+   CARD FAN CAROUSEL STYLES
+   ═══════════════════════════════════════════════════════════════ */
+.fan-layout {
+  height: min(38rem, 70vh);
+}
+
+.fan-card {
+  position: absolute;
+  will-change: transform;
+  backface-visibility: hidden;
+  background: rgba(18, 18, 18, 0.7);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: min(3.316rem, 6.11vh);
+  width: min(20rem, 36.84vh);
+  height: min(35rem, 64.47vh);
+  overflow: clip;
+  box-shadow: 0 15px 35px rgba(0, 0, 0, 0.45);
+}
+
+.fan-card:after {
+  content: "";
+  z-index: 100;
+  pointer-events: auto;
+  height: 4rem;
+  position: absolute;
+  bottom: -4rem;
+  left: 0;
+  right: 0;
+}
+
+@media (max-width: 1024px) {
+  .fan-layout {
+    height: min(34rem, 70vh);
+  }
+  .fan-card {
+    border-radius: min(2.6rem, 5.35vh);
+    width: min(16rem, 32.94vh);
+    height: min(28rem, 57.65vh);
+  }
+}
+
+@media (max-width: 768px) {
+  .fan-layout {
+    height: min(28rem, 70vh);
+  }
+  .fan-card {
+    border-radius: min(2rem, 5vh);
+    width: min(12rem, 30vh);
+    height: min(21rem, 52.5vh);
+  }
+}
+
+@media (max-width: 640px) {
+  .fan-layout {
+    height: min(26rem, 70vh);
+  }
+  .fan-card {
+    border-radius: min(1.5rem, 4.04vh);
+    width: min(9rem, 24.23vh);
+    height: min(15.75rem, 42.4vh);
+  }
+}
+
+@media (max-width: 480px) {
+  .fan-layout {
+    height: min(22rem, 70vh);
+  }
+  .fan-card {
+    border-radius: min(1.2rem, 3.82vh);
+    width: min(7rem, 22.27vh);
+    height: min(12.25rem, 38.98vh);
+  }
+}
+

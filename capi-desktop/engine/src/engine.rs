@@ -46,6 +46,7 @@ pub struct Engine {
     streams: RwLock<HashMap<String, CachedStream>>,
     lyrics: RwLock<HashMap<String, CachedLyrics>>,
     searches: RwLock<HashMap<String, CachedSearch>>,
+    ytm: std::sync::Arc<crate::ytm::YtmClient>,
 }
 
 impl Engine {
@@ -55,7 +56,7 @@ impl Engine {
         })?;
 
         let rp = RustyPipe::builder()
-            .storage_dir(storage_dir)
+            .storage_dir(storage_dir.clone())
             .no_botguard()
             .timeout(DEFAULT_TIMEOUT)
             .n_http_retries(1)
@@ -67,6 +68,8 @@ impl Engine {
             .build()
             .map_err(|e| EngineError::Internal(format!("no se pudo crear el cliente HTTP: {e}")))?;
 
+        let ytm = std::sync::Arc::new(crate::ytm::YtmClient::new(storage_dir));
+
         Ok(Self {
             rp,
             http,
@@ -75,7 +78,54 @@ impl Engine {
             streams: RwLock::new(HashMap::new()),
             lyrics: RwLock::new(HashMap::new()),
             searches: RwLock::new(HashMap::new()),
+            ytm,
         })
+    }
+
+    pub fn ytm(&self) -> &crate::ytm::YtmClient {
+        &self.ytm
+    }
+
+    pub async fn get_media_info(
+        &self,
+        video_id: &str,
+    ) -> Result<crate::ytm::MediaInfo, EngineError> {
+        self.ytm.get_media_info(video_id).await
+    }
+
+    pub async fn subscribe_channel(
+        &self,
+        channel_id: &str,
+        subscribe: bool,
+    ) -> Result<bool, EngineError> {
+        self.ytm.subscribe_channel(channel_id, subscribe).await
+    }
+
+    pub async fn like_video(&self, video_id: &str, like: bool) -> Result<bool, EngineError> {
+        self.ytm.like_video(video_id, like).await
+    }
+
+    pub async fn ytm_account_state(&self) -> crate::ytm::YtmAccountState {
+        self.ytm.get_account_state().await
+    }
+
+    pub async fn save_ytm_session(
+        &self,
+        cookie: String,
+        visitor_data: Option<String>,
+        data_sync_id: Option<String>,
+    ) -> Result<crate::ytm::YtmAccountState, EngineError> {
+        self.ytm
+            .save_session(cookie, visitor_data, data_sync_id)
+            .await
+    }
+
+    pub async fn clear_ytm_session(&self) -> Result<(), EngineError> {
+        self.ytm.clear_session().await
+    }
+
+    pub async fn sync_ytm(&self) -> Result<crate::ytm::YtmSyncData, EngineError> {
+        self.ytm.full_sync().await
     }
 
     // ─── Catálogo ─────────────────────────────────────────────────────

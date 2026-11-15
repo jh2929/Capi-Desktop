@@ -318,11 +318,10 @@ export interface HomeSection {
   items: any[];
 }
 
-export async function getPersonalizedHomeSections(buscarCancion: (query: string) => Promise<any[]>): Promise<HomeSection[]> {
+export async function getPersonalizedHomeSections(_buscarCancion: (query: string) => Promise<any[]>): Promise<HomeSection[]> {
   const sections: HomeSection[] = [];
 
   try {
-    // 1. Favorite tracks
     const topTracks = await getTopTracksFromDB(10);
     if (topTracks.length >= 3) {
       sections.push({
@@ -341,7 +340,6 @@ export async function getPersonalizedHomeSections(buscarCancion: (query: string)
       });
     }
 
-    // 2. Recently played
     const recent = await getRecentTracksFromDB(10);
     if (recent.length >= 3) {
       sections.push({
@@ -359,38 +357,236 @@ export async function getPersonalizedHomeSections(buscarCancion: (query: string)
         })),
       });
     }
-
-    // 3. Top artist track searches (fill remaining space with relevant content)
-    const topArtists = await getTopArtistsFromDB(6);
-    for (const artist of topArtists.slice(0, 4)) {
-      const cached = await getCachedTracksByArtist(artist.artistName, 6);
-      if (cached.length >= 3) {
-        sections.push({
-          id: `artist-${artist.artistName}`,
-          title: artist.artistName,
-          type: "artist_tracks",
-          items: cached,
-        });
-        continue;
-      }
-      // Search YouTube for this artist's tracks
-      try {
-        const results = await buscarCancion(`${artist.artistName} - topic`);
-        if (results.length >= 3) {
-          sections.push({
-            id: `artist-${artist.artistName}`,
-            title: artist.artistName,
-            type: "artist_tracks",
-            items: results.slice(0, 6),
-          });
-        }
-      } catch {
-        // skip failed artist search
-      }
-    }
   } catch (err) {
     console.error("Failed to generate personalized home sections:", err);
   }
 
   return sections;
+}
+
+export interface CapiSmartPlaylist {
+  id: string;
+  name: string;
+  description: string;
+  subtitle: string;
+  coverGradient: string;
+  coverImage?: string;
+  badge?: string;
+  tracks: any[];
+}
+
+export async function generateCapiPlaylists(
+  buscarCancion: (query: string) => Promise<any[]>
+): Promise<CapiSmartPlaylist[]> {
+  const playlists: CapiSmartPlaylist[] = [];
+
+  try {
+    const topTracks = await getTopTracksFromDB(24);
+    const topArtists = await getTopArtistsFromDB(8);
+    const recentTracks = await getRecentTracksFromDB(15);
+
+    // 1. "Mix Diario de Capi"
+    const dailyTracks: any[] = [];
+    const seenIds = new Set<string>();
+
+    for (const t of topTracks.slice(0, 8)) {
+      if (!seenIds.has(t.trackId)) {
+        seenIds.add(t.trackId);
+        dailyTracks.push({
+          id: t.trackId,
+          title: t.title,
+          artist: t.artist,
+          album: "",
+          duration: 0,
+          thumbnail: t.thumbnail,
+          artistId: t.artistId,
+        });
+      }
+    }
+
+    for (const r of recentTracks.slice(0, 5)) {
+      if (!seenIds.has(r.trackId)) {
+        seenIds.add(r.trackId);
+        dailyTracks.push({
+          id: r.trackId,
+          title: r.title,
+          artist: r.artist,
+          album: r.album || "",
+          duration: 0,
+          thumbnail: r.thumbnail,
+          artistId: r.artistId,
+        });
+      }
+    }
+
+    // Top artist songs for daily mix
+    for (const a of topArtists.slice(0, 2)) {
+      try {
+        const cached = await getCachedTracksByArtist(a.artistName, 4);
+        for (const item of cached) {
+          const tid = item.id || item.videoId;
+          if (tid && !seenIds.has(tid)) {
+            seenIds.add(tid);
+            dailyTracks.push(item);
+          }
+        }
+        if (dailyTracks.length < 12) {
+          const queryTracks = await buscarCancion(`${a.artistName} mix`);
+          for (const item of queryTracks.slice(0, 4)) {
+            const tid = item.id || item.videoId;
+            if (tid && !seenIds.has(tid)) {
+              seenIds.add(tid);
+              dailyTracks.push(item);
+            }
+          }
+        }
+      } catch {}
+    }
+
+    if (dailyTracks.length >= 3) {
+      playlists.push({
+        id: "capi-smart-daily-mix",
+        name: "Mix Diario de Capi",
+        description: "Tu mezcla personalizada de hoy con tus canciones más reproducidas y sugerencias afines.",
+        subtitle: "Creado por Capi para ti",
+        coverGradient: "linear-gradient(135deg, #6366f1 0%, #4338ca 50%, #1e1b4b 100%)",
+        coverImage: dailyTracks[0]?.thumbnail,
+        badge: "Mix Diario",
+        tracks: dailyTracks,
+      });
+    }
+
+    // 2. Artist Playlists: "Mix de [Artista]" para tus artistas más escuchados
+    const artistGradients = [
+      "linear-gradient(135deg, #059669 0%, #0d9488 50%, #064e3b 100%)",
+      "linear-gradient(135deg, #e11d48 0%, #be123c 50%, #4c0519 100%)",
+      "linear-gradient(135deg, #d97706 0%, #b45309 50%, #451a03 100%)",
+      "linear-gradient(135deg, #8b5cf6 0%, #6d28d9 50%, #2e1065 100%)",
+      "linear-gradient(135deg, #0284c7 0%, #0369a1 50%, #082f49 100%)",
+    ];
+
+    for (let i = 0; i < topArtists.slice(0, 4).length; i++) {
+      const artist = topArtists[i];
+      const artistTracks: any[] = [];
+      const artistSeen = new Set<string>();
+
+      // Canciones en historial del usuario
+      for (const t of topTracks) {
+        if (t.artist.toLowerCase().includes(artist.artistName.toLowerCase()) && !artistSeen.has(t.trackId)) {
+          artistSeen.add(t.trackId);
+          artistTracks.push({
+            id: t.trackId,
+            title: t.title,
+            artist: t.artist,
+            album: "",
+            duration: 0,
+            thumbnail: t.thumbnail,
+            artistId: t.artistId || artist.artistId,
+          });
+        }
+      }
+
+      // Canciones más populares del artista
+      try {
+        const hits = await buscarCancion(`${artist.artistName} greatest hits`);
+        for (const item of hits) {
+          const tid = item.id || item.videoId;
+          if (tid && !artistSeen.has(tid)) {
+            artistSeen.add(tid);
+            artistTracks.push(item);
+          }
+        }
+      } catch {}
+
+      if (artistTracks.length >= 3) {
+        playlists.push({
+          id: `capi-smart-artist-${encodeURIComponent(artist.artistName.toLowerCase().replace(/\s+/g, "-"))}`,
+          name: `Mix de ${artist.artistName}`,
+          description: `Las mejores canciones de ${artist.artistName} y música similar seleccionadas según lo que escuchas.`,
+          subtitle: `Basado en ${artist.artistName}`,
+          coverGradient: artistGradients[i % artistGradients.length],
+          coverImage: artist.thumbnail || artistTracks[0]?.thumbnail,
+          badge: `Artista • ${artist.artistName}`,
+          tracks: artistTracks,
+        });
+      }
+    }
+
+    // 3. "Descubrimiento Capi" (artistas y canciones afines)
+    if (topArtists.length > 0) {
+      const discoveryTracks: any[] = [];
+      const discSeen = new Set<string>();
+      const existingUserIds = new Set(topTracks.map(t => t.trackId));
+
+      try {
+        const seed = topArtists[0].artistName;
+        const discResults = await buscarCancion(`${seed} radio playlist`);
+        for (const item of discResults) {
+          const tid = item.id || item.videoId;
+          if (tid && !discSeen.has(tid) && !existingUserIds.has(tid)) {
+            discSeen.add(tid);
+            discoveryTracks.push(item);
+          }
+        }
+      } catch {}
+
+      if (discoveryTracks.length >= 4) {
+        playlists.push({
+          id: "capi-smart-discovery",
+          name: "Descubrimiento Capi",
+          description: "Nuevas canciones y talentos similares a lo que más disfrutas escuchar.",
+          subtitle: "Descubre nueva música",
+          coverGradient: "linear-gradient(135deg, #06b6d4 0%, #0284c7 50%, #0c4a6e 100%)",
+          coverImage: discoveryTracks[0]?.thumbnail,
+          badge: "Descubrimiento",
+          tracks: discoveryTracks,
+        });
+      }
+    }
+
+    // 4. "Tus Favoritos de Siempre"
+    if (topTracks.length >= 4) {
+      playlists.push({
+        id: "capi-smart-favorites",
+        name: "Tus Favoritos de Siempre",
+        description: "Las canciones que más has repetido y escuchado en Capi.",
+        subtitle: "Tus más escuchadas",
+        coverGradient: "linear-gradient(135deg, #f43f5e 0%, #be123c 50%, #4c0519 100%)",
+        coverImage: topTracks[0]?.thumbnail,
+        badge: "En bucle",
+        tracks: topTracks.map(t => ({
+          id: t.trackId,
+          title: t.title,
+          artist: t.artist,
+          album: "",
+          duration: 0,
+          thumbnail: t.thumbnail,
+          artistId: t.artistId,
+        })),
+      });
+    }
+
+    // Fallback si no hay historial previo todavía
+    if (playlists.length === 0) {
+      try {
+        const topHits = await buscarCancion("top canciones exitos 2024");
+        if (topHits.length >= 4) {
+          playlists.push({
+            id: "capi-smart-welcome",
+            name: "Mix de Bienvenida Capi",
+            description: "Los mayores éxitos del momento seleccionados para empezar a disfrutar de tu música.",
+            subtitle: "Creado por Capi para ti",
+            coverGradient: "linear-gradient(135deg, #6366f1 0%, #4338ca 50%, #1e1b4b 100%)",
+            coverImage: topHits[0]?.thumbnail,
+            badge: "Bienvenida",
+            tracks: topHits,
+          });
+        }
+      } catch {}
+    }
+  } catch (err) {
+    console.error("Error al generar playlists inteligentes de Capi:", err);
+  }
+
+  return playlists;
 }

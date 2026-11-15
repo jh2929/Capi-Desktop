@@ -3,9 +3,12 @@
   "app": {
     "windows": [
       {
+        "label": "main",
         "title": "Capi (Dev)",
         "width": 1000,
-        "height": 700
+        "height": 700,
+        "devtools": true,
+        "resizable": true
       }
     ]
   }

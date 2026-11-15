@@ -3,16 +3,31 @@ import { Music } from "lucide-react";
 import { getCachedThumbnail, setCachedThumbnail } from "./thumbnailCache";
 
 const QUALITY_TRANSFORMS = [
-  (url: string) =>
-    url
-      .replace(/=w\d+-h\d+/, "=w544-h544")
-      .replace(/=s\d+/, "=s544")
-      .replace(/\/(default|mqdefault|hqdefault|sddefault)\.jpg/, "/maxresdefault.jpg"),
-  (url: string) =>
-    url
-      .replace(/=w\d+-h\d+/, "=w300-h300")
-      .replace(/=s\d+/, "=s300")
-      .replace("/maxresdefault.jpg", "/hqdefault.jpg"),
+  (url: string) => {
+    if (url.includes("googleusercontent.com") || url.includes("ggpht.com")) {
+      if (url.includes("=w") || url.includes("=s")) {
+        return url.split("=")[0] + "=w800-h800-l90-rj";
+      }
+      return url.replace(/w\d+-h\d+/, "w800-h800");
+    }
+    if (url.includes("ytimg.com")) {
+      return url.replace(/\/(default|mqdefault|hqdefault|sddefault)\.jpg/, "/maxresdefault.jpg");
+    }
+    return url;
+  },
+  (url: string) => {
+    if (url.includes("googleusercontent.com") || url.includes("ggpht.com")) {
+      if (url.includes("=w") || url.includes("=s")) {
+        return url.split("=")[0] + "=w544-h544-l90-rj";
+      }
+      return url.replace(/w\d+-h\d+/, "w544-h544");
+    }
+    if (url.includes("ytimg.com")) {
+      return url.replace(/\/(default|mqdefault|hqdefault|sddefault|maxresdefault)\.jpg/, "/hqdefault.jpg");
+    }
+    return url;
+  },
+  (url: string) => url,
 ];
 
 const stringToColor = (s: string) => {

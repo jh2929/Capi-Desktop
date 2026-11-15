@@ -3,10 +3,10 @@ use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::Read;
-use std::io::Write;
+use std::io::{Read, Seek, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -1355,138 +1355,326 @@ async fn descargar_cancion(
     let dest_path = artist_dir.join(&filename);
     let part_path = artist_dir.join(format!("{}.part", filename));
 
+    // Si ya existe y es válido, retornar inmediatamente
+    if dest_path.exists() {
+        if let Ok(meta) = std::fs::metadata(&dest_path) {
+            if meta.len() > 1024 {
+                let _ = app.emit(
+                    "download-progress",
+                    DownloadProgress {
+                        track_id: track_id.clone(),
+                        progress: 100.0,
+                    },
+                );
+                if let Some(p) = dest_path.to_str() {
+                    return Ok(p.to_string());
+                }
+            }
+        }
+    }
+
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .connect_timeout(std::time::Duration::from_secs(10))
-        .pool_idle_timeout(std::time::Duration::from_secs(20))
+        .pool_idle_timeout(std::time::Duration::from_secs(30))
+        .pool_max_idle_per_host(10)
         .tcp_nodelay(true)
         .build()
         .map_err(|e| format!("Error creando cliente HTTP: {}", e))?;
 
-    let total_size = client
+    // Sondear tamaño total y soporte de Range con una petición ultraligera de 1 byte
+    let probe_res = client
         .get(&url)
+        .header("Range", "bytes=0-0")
+        .header("Referer", "https://music.youtube.com/")
         .send()
         .await
-        .map_err(|e| format!("Error en la petición de descarga: {}", e))?
-        .content_length()
-        .ok_or_else(|| "No se pudo obtener el tamaño total de la canción".to_string())?;
+        .map_err(|e| format!("Error conectando con el stream de audio: {}", e))?;
 
-    let mut downloaded: u64 = 0;
-    let mut file = std::io::BufWriter::with_capacity(
-        64 * 1024,
-        std::fs::OpenOptions::new()
+    let status = probe_res.status();
+    let (supports_range, total_size, immediate_stream) =
+        if status == reqwest::StatusCode::PARTIAL_CONTENT {
+            let total = if let Some(cr) = probe_res
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|v| v.to_str().ok())
+            {
+                cr.rsplit('/')
+                    .next()
+                    .and_then(|s| s.trim().parse::<u64>().ok())
+                    .unwrap_or(0)
+            } else {
+                0
+            };
+            (total > 0, total, None)
+        } else if status.is_success() {
+            // El servidor ignora Range y envía el stream completo directamente
+            let len = probe_res.content_length().unwrap_or(0);
+            (false, len, Some(probe_res))
+        } else {
+            return Err(format!(
+                "El servidor de audio devolvió error HTTP {}",
+                status
+            ));
+        };
+
+    let downloaded_atomic = Arc::new(AtomicU64::new(0));
+    let last_emit_instant = Arc::new(Mutex::new(std::time::Instant::now()));
+
+    if supports_range && total_size >= 512 * 1024 {
+        // ====================================================================
+        // MOTOR DE DESCARGA MULTI-SEGMENTO DE ALTA VELOCIDAD
+        // ====================================================================
+        // Divide el archivo en múltiples conexiones concurrentes (4 o 6),
+        // eliminando por completo el throttling de tasa de bits de YouTube Video CDN.
+        let num_segments: u64 = if total_size > 12 * 1024 * 1024 {
+            6
+        } else if total_size > 2 * 1024 * 1024 {
+            4
+        } else {
+            3
+        };
+
+        let file = std::fs::OpenOptions::new()
             .create(true)
+            .read(true)
             .write(true)
             .truncate(true)
             .open(&part_path)
-            .map_err(|e| format!("No se pudo crear el archivo temporal de descarga: {}", e))?,
-    );
+            .map_err(|e| format!("No se pudo crear archivo temporal: {}", e))?;
+        file.set_len(total_size)
+            .map_err(|e| format!("No se pudo preasignar espacio para descarga: {}", e))?;
 
-    // Hardening: Retry loop up to 3 attempts with Range resumes
-    let mut attempts = 0;
-    while downloaded < total_size {
-        if attempts > 3 {
-            let _ = std::fs::remove_file(&part_path);
-            return Err("Descarga fallida tras múltiples reintentos de red".to_string());
+        let shared_file = Arc::new(Mutex::new(file));
+        let segment_size = total_size.div_ceil(num_segments);
+        let mut handles = Vec::with_capacity(num_segments as usize);
+
+        for seg_idx in 0..num_segments {
+            let seg_start = seg_idx * segment_size;
+            let seg_end = ((seg_idx + 1) * segment_size - 1).min(total_size - 1);
+            let client = client.clone();
+            let url = url.clone();
+            let shared_file = shared_file.clone();
+            let downloaded_atomic = downloaded_atomic.clone();
+            let last_emit_instant = last_emit_instant.clone();
+            let app = app.clone();
+            let track_id = track_id.clone();
+
+            handles.push(tokio::spawn(async move {
+                let mut downloaded_in_seg: u64 = 0;
+                let seg_len = seg_end - seg_start + 1;
+                let mut attempts = 0;
+
+                while downloaded_in_seg < seg_len {
+                    if attempts >= 4 {
+                        return Err("Segmento fallido tras múltiples reintentos".to_string());
+                    }
+
+                    let req_start = seg_start + downloaded_in_seg;
+                    let req_end = seg_end;
+
+                    let res = match client
+                        .get(&url)
+                        .header("Range", format!("bytes={}-{}", req_start, req_end))
+                        .header("Referer", "https://music.youtube.com/")
+                        .send()
+                        .await
+                    {
+                        Ok(r) if r.status().is_success() => r,
+                        _ => {
+                            attempts += 1;
+                            tokio::time::sleep(std::time::Duration::from_millis(400 * attempts))
+                                .await;
+                            continue;
+                        }
+                    };
+
+                    let mut stream = res.bytes_stream();
+                    let mut stream_err = false;
+
+                    while let Some(chunk_res) = stream.next().await {
+                        match chunk_res {
+                            Ok(chunk) => {
+                                let chunk_len = chunk.len() as u64;
+                                let write_offset = req_start + downloaded_in_seg;
+
+                                {
+                                    let mut f = match shared_file.lock() {
+                                        Ok(guard) => guard,
+                                        Err(_) => {
+                                            return Err("Fallo bloqueando archivo para escritura"
+                                                .to_string())
+                                        }
+                                    };
+                                    if f.seek(std::io::SeekFrom::Start(write_offset)).is_err()
+                                        || f.write_all(chunk.as_ref()).is_err()
+                                    {
+                                        return Err(
+                                            "Error escribiendo segmento en disco".to_string()
+                                        );
+                                    }
+                                }
+
+                                downloaded_in_seg += chunk_len;
+                                let total_dl = downloaded_atomic
+                                    .fetch_add(chunk_len, Ordering::Relaxed)
+                                    + chunk_len;
+
+                                let should_emit = {
+                                    if let Ok(mut last) = last_emit_instant.lock() {
+                                        if last.elapsed() >= std::time::Duration::from_millis(80) {
+                                            *last = std::time::Instant::now();
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        false
+                                    }
+                                };
+
+                                if should_emit {
+                                    let pct =
+                                        ((total_dl as f64 / total_size as f64) * 100.0).min(99.0);
+                                    let _ = app.emit(
+                                        "download-progress",
+                                        DownloadProgress {
+                                            track_id: track_id.clone(),
+                                            progress: pct,
+                                        },
+                                    );
+                                }
+                            }
+                            Err(_) => {
+                                stream_err = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if stream_err {
+                        attempts += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(400 * attempts)).await;
+                    }
+                }
+                Ok(())
+            }));
         }
 
-        let mut req = client.get(&url);
-        if downloaded > 0 {
-            req = req.header("Range", format!("bytes={}-", downloaded));
-        }
-
-        let res = match req.send().await {
-            Ok(r) => r,
-            Err(_e) => {
-                attempts += 1;
-                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                continue;
+        for handle in handles {
+            match handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    let _ = std::fs::remove_file(&part_path);
+                    return Err(e);
+                }
+                Err(e) => {
+                    let _ = std::fs::remove_file(&part_path);
+                    return Err(format!("Descarga de segmento interrumpida: {}", e));
+                }
             }
+        }
+
+        if let Ok(mut f) = shared_file.lock() {
+            let _ = f.flush();
+        };
+    } else {
+        // ====================================================================
+        // DESCARGA STREAMING OPTIMIZADA (FALLBACK)
+        // ====================================================================
+        let mut file = std::io::BufWriter::with_capacity(
+            256 * 1024,
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&part_path)
+                .map_err(|e| format!("No se pudo crear archivo temporal: {}", e))?,
+        );
+
+        let res = match immediate_stream {
+            Some(r) => r,
+            None => client
+                .get(&url)
+                .header("Referer", "https://music.youtube.com/")
+                .send()
+                .await
+                .map_err(|e| format!("Error en petición de audio: {}", e))?,
         };
 
-        let status = res.status();
-        if downloaded > 0 && status != reqwest::StatusCode::PARTIAL_CONTENT {
-            if status.is_success() {
-                // Servidor ignoró el header Range y envió el archivo completo: reiniciar a 0
-                downloaded = 0;
-                drop(file);
-                file = std::io::BufWriter::with_capacity(
-                    64 * 1024,
-                    std::fs::OpenOptions::new()
-                        .create(true)
-                        .write(true)
-                        .truncate(true)
-                        .open(&part_path)
-                        .map_err(|e| format!("No se pudo reiniciar el archivo temporal: {}", e))?,
-                );
-            } else {
-                attempts += 1;
-                tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-                continue;
-            }
-        } else if downloaded == 0 && !status.is_success() {
-            attempts += 1;
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-            continue;
-        }
+        let stream_total = if total_size > 0 {
+            total_size
+        } else {
+            res.content_length().unwrap_or(0)
+        };
 
         let mut stream = res.bytes_stream();
-        let mut stream_err = false;
+        let mut total_dl: u64 = 0;
 
-        loop {
-            let next_chunk =
-                tokio::time::timeout(std::time::Duration::from_secs(15), stream.next()).await;
-            match next_chunk {
-                Ok(Some(Ok(chunk))) => {
+        while let Some(chunk_res) = stream.next().await {
+            match chunk_res {
+                Ok(chunk) => {
                     if let Err(e) = file.write_all(chunk.as_ref()) {
                         let _ = std::fs::remove_file(&part_path);
-                        return Err(format!("Error escribiendo bytes en el disco: {}", e));
+                        return Err(format!("Error escribiendo datos: {}", e));
                     }
-                    downloaded += chunk.len() as u64;
-                    let progress = (downloaded as f64 / total_size as f64) * 100.0;
+                    total_dl += chunk.len() as u64;
 
-                    let _ = app.emit(
-                        "download-progress",
-                        DownloadProgress {
-                            track_id: track_id.clone(),
-                            progress,
-                        },
-                    );
+                    let should_emit = {
+                        if let Ok(mut last) = last_emit_instant.lock() {
+                            if last.elapsed() >= std::time::Duration::from_millis(80) {
+                                *last = std::time::Instant::now();
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            false
+                        }
+                    };
+
+                    if should_emit && stream_total > 0 {
+                        let pct = ((total_dl as f64 / stream_total as f64) * 100.0).min(99.0);
+                        let _ = app.emit(
+                            "download-progress",
+                            DownloadProgress {
+                                track_id: track_id.clone(),
+                                progress: pct,
+                            },
+                        );
+                    }
                 }
-                Ok(Some(Err(_))) | Err(_) => {
-                    stream_err = true;
-                    break;
-                }
-                Ok(None) => {
-                    break;
+                Err(e) => {
+                    let _ = std::fs::remove_file(&part_path);
+                    return Err(format!("Interrupción en stream de descarga: {}", e));
                 }
             }
         }
 
-        if stream_err {
-            attempts += 1;
-            tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
-        } else if downloaded >= total_size {
-            break;
-        }
+        file.flush()
+            .map_err(|e| format!("Error al sincronizar archivo en disco: {}", e))?;
     }
 
-    // Flush BufWriter before validation
-    file.flush()
-        .map_err(|e| format!("Error al sincronizar archivo: {}", e))?;
-    drop(file);
-
-    // Validation post-download
+    // Validación post-descarga
     let metadata = std::fs::metadata(&part_path)
         .map_err(|e| format!("Fallo al validar metadatos del archivo: {}", e))?;
-    if metadata.len() < 1024 || metadata.len() != total_size {
+    if metadata.len() < 1024 || (total_size > 0 && metadata.len() != total_size) {
         let _ = std::fs::remove_file(&part_path);
         return Err("Descarga inválida: El archivo final está corrupto o incompleto".to_string());
     }
 
-    // Atomic rename
+    // Renombrado atómico a archivo final
     std::fs::rename(&part_path, &dest_path)
         .map_err(|e| format!("Error al mover archivo a ruta final: {}", e))?;
+
+    // Progreso final 100%
+    let _ = app.emit(
+        "download-progress",
+        DownloadProgress {
+            track_id: track_id.clone(),
+            progress: 100.0,
+        },
+    );
 
     let absolute_path = dest_path
         .to_str()
@@ -2405,17 +2593,33 @@ async fn discord_update(
         let mut client_guard = client_arc.lock().map_err(|e| e.to_string())?;
         if let Some(client) = client_guard.as_mut() {
             if !is_playing {
-                let _ = client.clear_activity();
+                if !title.is_empty() {
+                    let mut assets = activity::Assets::new().large_text(&title);
+                    if thumbnail.starts_with("http") {
+                        assets = assets.large_image(&thumbnail);
+                    } else {
+                        assets = assets.large_image("logo");
+                    }
+                    let pause_state = format!("En pausa • {}", artist);
+                    let act = activity::Activity::new()
+                        .state(&pause_state)
+                        .details(&title)
+                        .assets(assets);
+                    let _ = client.set_activity(act);
+                } else {
+                    let _ = client.clear_activity();
+                }
                 return Ok(());
             }
 
             let mut assets = activity::Assets::new().large_text(&title);
 
-            if !thumbnail.is_empty() {
+            if thumbnail.starts_with("http") {
                 assets = assets.large_image(&thumbnail);
             } else {
                 assets = assets.large_image("logo");
             }
+            assets = assets.small_image("logo").small_text("Capi");
 
             let mut act = activity::Activity::new()
                 .state(&artist)
@@ -2728,6 +2932,264 @@ fn media_get_state(state: tauri::State<'_, Arc<Mutex<MediaState>>>) -> Result<Me
     Ok(guard.clone())
 }
 
+#[tauri::command]
+async fn obtener_reproducciones(
+    engine: tauri::State<'_, Arc<Engine>>,
+    video_id: String,
+) -> Result<String, String> {
+    let info = engine
+        .get_media_info(&video_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    serde_json::to_string(&info).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn suscribirse_canal(
+    engine: tauri::State<'_, Arc<Engine>>,
+    channel_id: String,
+    suscribir: bool,
+) -> Result<bool, String> {
+    engine
+        .subscribe_channel(&channel_id, suscribir)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn like_cancion_ytm(
+    engine: tauri::State<'_, Arc<Engine>>,
+    video_id: String,
+    like: bool,
+) -> Result<bool, String> {
+    engine
+        .like_video(&video_id, like)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn obtener_estado_sesion_ytm(
+    engine: tauri::State<'_, Arc<Engine>>,
+) -> Result<String, String> {
+    let state = engine.ytm_account_state().await;
+    serde_json::to_string(&state).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn guardar_sesion_ytm(
+    engine: tauri::State<'_, Arc<Engine>>,
+    cookie: String,
+    visitor_data: Option<String>,
+    data_sync_id: Option<String>,
+) -> Result<String, String> {
+    let state = engine
+        .save_ytm_session(cookie, visitor_data, data_sync_id)
+        .await
+        .map_err(|e| e.to_string())?;
+    serde_json::to_string(&state).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn cerrar_sesion_ytm(
+    app: tauri::AppHandle,
+    engine: tauri::State<'_, Arc<Engine>>,
+) -> Result<(), String> {
+    engine
+        .clear_ytm_session()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Limpiar archivos de cookies de WebKit si existen para evitar recordar sesiones
+    if let Ok(app_data) = app.path().app_data_dir() {
+        let _ = std::fs::remove_file(app_data.join("cookies"));
+        let _ = std::fs::remove_file(app_data.join("cookies.sqlite"));
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn sincronizar_ytm(engine: tauri::State<'_, Arc<Engine>>) -> Result<String, String> {
+    let sync_data = engine.sync_ytm().await.map_err(|e| e.to_string())?;
+    serde_json::to_string(&sync_data).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn abrir_login_ytm(
+    app: tauri::AppHandle,
+    engine: tauri::State<'_, Arc<Engine>>,
+) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("login-ytm") {
+        let _ = win.close();
+    }
+
+    let login_url =
+        "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmusic.youtube.com";
+    let auth_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let auth_done_nav = auth_done.clone();
+    let app_clone_nav = app.clone();
+    let engine_clone_nav = engine.inner().clone();
+    let rt_handle = tokio::runtime::Handle::current();
+    let rt_handle_nav = rt_handle.clone();
+
+    let init_script = r#"
+        (function() {
+            function checkYtmAuth() {
+                try {
+                    if (window !== window.top) return;
+                    if (window.__capi_auth_sent) return;
+                    var h = window.location.hostname || "";
+                    if (h === "music.youtube.com" || h === "www.youtube.com") {
+                        var ck = document.cookie || "";
+                        if (ck.indexOf("SAPISID") !== -1 || ck.indexOf("__Secure-3PAPISID") !== -1 || ck.indexOf("__Secure-1PAPISID") !== -1) {
+                            window.__capi_auth_sent = true;
+                            var vd = "";
+                            var ds = "";
+                            try {
+                                if (window.yt && window.yt.config_) {
+                                    vd = window.yt.config_.VISITOR_DATA || "";
+                                    ds = window.yt.config_.DATASYNC_ID || "";
+                                }
+                                if (!vd && window.ytcfg && typeof window.ytcfg.get === 'function') {
+                                    vd = window.ytcfg.get('VISITOR_DATA') || "";
+                                    ds = window.ytcfg.get('DATASYNC_ID') || "";
+                                }
+                            } catch(e) {}
+                            var payload = {
+                                cookie: ck,
+                                visitor_data: vd || null,
+                                data_sync_id: ds || null
+                            };
+                            window.location.href = "https://capi.local/auth_success?payload=" + encodeURIComponent(JSON.stringify(payload));
+                        }
+                    }
+                } catch(e) {}
+            }
+            setInterval(checkYtmAuth, 600);
+            checkYtmAuth();
+        })();
+    "#;
+
+    let _win = WebviewWindowBuilder::new(
+        &app,
+        "login-ytm",
+        tauri::WebviewUrl::External(reqwest::Url::parse(login_url).map_err(|e| e.to_string())?),
+    )
+    .title("Iniciar sesión en YouTube Music - Capi")
+    .inner_size(600.0, 750.0)
+    .incognito(false)
+    .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+    .initialization_script(init_script)
+    .on_navigation(move |url| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if url.host_str() == Some("capi.local") && url.path() == "/auth_success" {
+                if let Some(payload_str) = url.query_pairs().find(|(k, _)| k == "payload").map(|(_, v)| v.into_owned()) {
+                    if !auth_done_nav.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        let app_h = app_clone_nav.clone();
+                        let eng = engine_clone_nav.clone();
+                        rt_handle_nav.spawn(async move {
+                            #[derive(serde::Deserialize)]
+                            struct AuthPayload {
+                                cookie: String,
+                                visitor_data: Option<String>,
+                                data_sync_id: Option<String>,
+                            }
+                            if let Ok(payload) = serde_json::from_str::<AuthPayload>(&payload_str) {
+                                let mut cookie_map = std::collections::HashMap::new();
+                                for part in payload.cookie.split(';') {
+                                    if let Some((k, v)) = part.trim().split_once('=') {
+                                        cookie_map.insert(k.trim().to_string(), v.trim().to_string());
+                                    }
+                                }
+                                if let Some(w) = app_h.get_webview_window("login-ytm") {
+                                    if let Ok(native_cookies) = w.cookies() {
+                                        for c in native_cookies {
+                                            cookie_map.insert(c.name().to_string(), c.value().to_string());
+                                        }
+                                    }
+                                }
+                                let merged_cookie = cookie_map
+                                    .into_iter()
+                                    .map(|(k, v)| format!("{k}={v}"))
+                                    .collect::<Vec<_>>()
+                                    .join("; ");
+
+                                match eng.save_ytm_session(merged_cookie, payload.visitor_data, payload.data_sync_id).await {
+                                    Ok(account_state) => {
+                                        let _ = app_h.emit("ytm-auth-result", serde_json::json!({
+                                            "success": true,
+                                            "name": account_state.name,
+                                            "email": account_state.email
+                                        }));
+                                        // Sincronización automática inmediata en segundo plano (sin descargar música)
+                                        if let Ok(sync_res) = eng.sync_ytm().await {
+                                            let _ = app_h.emit("ytm-sync-completed", serde_json::to_value(&sync_res).unwrap_or_default());
+                                        }
+                                    }
+                                    Err(err) => {
+                                        let _ = app_h.emit("ytm-auth-result", serde_json::json!({
+                                            "success": false,
+                                            "cancelled": false,
+                                            "message": format!("Error al guardar sesión: {}", err)
+                                        }));
+                                    }
+                                }
+                            }
+                            if let Some(w) = app_h.get_webview_window("login-ytm") {
+                                let _ = w.close();
+                            }
+                        });
+                    }
+                }
+                return false;
+            }
+            true
+        }));
+        result.unwrap_or(true)
+    })
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    let app_clone = app.clone();
+    let auth_done_monitor = auth_done.clone();
+
+    // Tarea asíncrona para inyectar evaluación periódica y vigilar cierre
+    tokio::spawn(async move {
+        for _ in 0..300 {
+            // Monitorear hasta 5 minutos
+            tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+
+            if auth_done_monitor.load(std::sync::atomic::Ordering::SeqCst) {
+                break;
+            }
+
+            let current_win = match app_clone.get_webview_window("login-ytm") {
+                Some(w) => w,
+                None => {
+                    // Ventana cerrada por el usuario antes de autenticarse
+                    if !auth_done_monitor.load(std::sync::atomic::Ordering::SeqCst) {
+                        let _ = app_clone.emit(
+                            "ytm-auth-result",
+                            serde_json::json!({
+                                "success": false,
+                                "cancelled": true,
+                                "message": "Ventana de autenticación cerrada."
+                            }),
+                        );
+                    }
+                    break;
+                }
+            };
+
+            // Inyectar script continuamente en caso de navegación SPA o redirección
+            let _ = current_win.eval(init_script);
+        }
+    });
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -2922,6 +3384,14 @@ pub fn run() {
                 }
             }
 
+            #[cfg(debug_assertions)]
+            {
+                if let Some(window) = handle.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -2950,7 +3420,15 @@ pub fn run() {
             media_get_state,
             descubrir_dispositivos_cast,
             transmitir_a_dispositivo,
-            consolidar_carpetas_descargas
+            consolidar_carpetas_descargas,
+            obtener_reproducciones,
+            suscribirse_canal,
+            like_cancion_ytm,
+            obtener_estado_sesion_ytm,
+            guardar_sesion_ytm,
+            cerrar_sesion_ytm,
+            sincronizar_ytm,
+            abrir_login_ytm
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
