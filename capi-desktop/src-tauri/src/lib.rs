@@ -13,6 +13,9 @@ use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent}
 use tauri::WebviewWindowBuilder;
 use tauri::{Emitter, Manager};
 
+pub mod mcp;
+pub use mcp::run_stdio_mcp;
+
 struct LocalServerState {
     port: u16,
     token: String,
@@ -3190,6 +3193,18 @@ async fn abrir_login_ytm(
     Ok(())
 }
 
+#[tauri::command]
+fn obtener_mcp_info() -> Result<mcp::McpInfo, String> {
+    let port = mcp::get_mcp_port();
+    Ok(mcp::McpInfo {
+        enabled: port > 0,
+        port,
+        http_url: format!("http://127.0.0.1:{}/mcp", port),
+        sse_url: format!("http://127.0.0.1:{}/sse", port),
+        tools_count: 22,
+    })
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -3235,11 +3250,21 @@ pub fn run() {
                 // los streams se resuelven bajo demanda.
                 let engine = Engine::new(capi_dir.join("engine"))
                     .map_err(|e| format!("No se pudo inicializar capi-engine: {e}"))?;
-                app.manage(Arc::new(engine));
+                let engine_arc = Arc::new(engine);
+                app.manage(engine_arc.clone());
 
                 let media_state = Arc::new(Mutex::new(MediaState::default()));
                 let proxy_media_state = media_state.clone();
+                let mcp_media_state = media_state.clone();
                 app.manage(media_state);
+
+                // Iniciar servidor MCP interno para herramientas de IA
+                let _ = mcp::start_mcp_server(
+                    engine_arc.clone(),
+                    mcp_media_state,
+                    handle.clone(),
+                    capi_dir.clone(),
+                );
 
                 let token = std::env::var("CAPI_PROXY_TOKEN")
                     .ok()
@@ -3428,7 +3453,8 @@ pub fn run() {
             guardar_sesion_ytm,
             cerrar_sesion_ytm,
             sincronizar_ytm,
-            abrir_login_ytm
+            abrir_login_ytm,
+            obtener_mcp_info
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

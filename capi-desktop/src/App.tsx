@@ -9,7 +9,7 @@ import {
   MoreVertical, X, Sparkle, GripVertical, Copy, RefreshCw,
   User, Radio, Mic2, LayoutGrid, List, Plus, Bell,
   Moon, Timer, BarChart3, Languages, RotateCcw, Trophy, Users, Repeat, Repeat1, Lock, Unlock, Upload, Pencil, HardDrive,
-  FileText, Check, CheckSquare, Eye, UserPlus, BookmarkPlus
+  FileText, Check, CheckSquare, Eye, UserPlus, BookmarkPlus, Key
 } from "lucide-react";
 import "./App.css";
 import { t, Locale, LOCALE_NAMES, TranslationKeys } from "./i18n";
@@ -654,6 +654,7 @@ function App() {
     const saved = localStorage.getItem("capi_favorites");
     return safeJsonParse<Track[]>(saved, []);
   });
+
   const [playlists, setPlaylists] = useState<Playlist[]>(() => {
     migrateKey("opentune_playlists", "capi_playlists");
     const saved = localStorage.getItem("capi_playlists");
@@ -681,6 +682,19 @@ function App() {
     const saved = localStorage.getItem("capi_downloaded_metadata");
     return safeJsonParse<Track[]>(saved, []);
   });
+  
+  const [downloadSearchQuery, setDownloadSearchQuery] = useState("");
+  const filteredDownloadedMetadata = useMemo(() => {
+    const q = downloadSearchQuery.trim().toLowerCase();
+    if (!q) return downloadedMetadata;
+    return downloadedMetadata.filter(track =>
+      (track.title && track.title.toLowerCase().includes(q)) ||
+      (track.artist && track.artist.toLowerCase().includes(q)) ||
+      (track.album && track.album.toLowerCase().includes(q))
+    );
+  }, [downloadedMetadata, downloadSearchQuery]);
+
+  const [mcpInfo, setMcpInfo] = useState<{ enabled: boolean; port: number; httpUrl: string; sseUrl: string; toolsCount: number } | null>(null);
   
   // Library views
   const getPlaylistCover = (playlist: Playlist): string => {
@@ -734,8 +748,8 @@ function App() {
   const [isRenamingPlaylist, setIsRenamingPlaylist] = useState(false);
   const [renamePlaylistName, setRenamePlaylistName] = useState("");
 
-  // Control de visibilidad de UI para sincronización con YouTube Music (oculto por solicitud del usuario, código conservado intacto)
-  const SHOW_YTM_SYNC_UI = false;
+  // Control de visibilidad de UI para sincronización con YouTube Music
+  const SHOW_YTM_SYNC_UI = true;
 
   // ─── YouTube Music, Reproducciones y Suscripciones ──────────────────
   interface YtmAccountState {
@@ -1008,8 +1022,22 @@ function App() {
       .then(json => {
         const state = JSON.parse(json);
         setYtmAccount(state);
-        if (state.loggedIn && (!ytmSyncData.playlists || ytmSyncData.playlists.length === 0)) {
+        if (state.loggedIn) {
           handleSyncYtm();
+        }
+      })
+      .catch(() => {});
+
+    invoke<any>("obtener_mcp_info")
+      .then(data => {
+        if (data) {
+          setMcpInfo({
+            enabled: data.enabled ?? true,
+            port: data.port ?? 19840,
+            httpUrl: data.http_url || `http://127.0.0.1:${data.port || 19840}/mcp`,
+            sseUrl: data.sse_url || `http://127.0.0.1:${data.port || 19840}/sse`,
+            toolsCount: data.tools_count || 22,
+          });
         }
       })
       .catch(() => {});
@@ -4341,7 +4369,41 @@ function App() {
             )}
           </form>
 
-          <div className="flex items-center gap-4 flex-shrink-0">
+          <div className="flex items-center gap-3 flex-shrink-0">
+            {ytmAccount.loggedIn ? (
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={handleSyncYtm}
+                  disabled={isSyncingYtm}
+                  className="px-3 py-1.5 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-400 hover:text-red-300 border border-red-500/20 text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  title="Sincronizar playlists y favoritos con YouTube Music"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncingYtm ? "animate-spin text-red-400" : "text-red-500"}`} />
+                  <span className="hidden sm:inline">{isSyncingYtm ? "Sincronizando..." : "Sincronizar"}</span>
+                </button>
+                <button
+                  onClick={() => setShowYtmModal(true)}
+                  className="w-8 h-8 rounded-full overflow-hidden border border-red-500/40 hover:border-red-500 transition cursor-pointer flex items-center justify-center bg-red-950/40"
+                  title={`YouTube Music: ${ytmAccount.name || ytmAccount.email || "Conectado"}`}
+                >
+                  {ytmAccount.photo ? (
+                    <img src={ytmAccount.photo} alt="YouTube" className="w-full h-full object-cover" />
+                  ) : (
+                    <YoutubeIcon className="w-4 h-4 text-red-500" />
+                  )}
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => setShowYtmModal(true)}
+                className="px-3 py-1.5 rounded-xl bg-red-600/15 hover:bg-red-600/25 text-red-400 hover:text-red-300 border border-red-500/30 text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer"
+                title="Conectar y sincronizar tu cuenta de YouTube Music"
+              >
+                <YoutubeIcon className="w-4 h-4 text-red-500" />
+                <span className="hidden sm:inline">Sincronizar YouTube</span>
+              </button>
+            )}
+
             {Object.keys(downloadProgress).length > 0 && (
               <button
                 onClick={() => navigateTo("download_manager")}
@@ -5795,26 +5857,53 @@ function App() {
 
               {libTab === "downloads" && (
                 <div className="space-y-4">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs text-text-secondary">
-                      {downloadedMetadata.length} canciones descargadas
-                    </span>
-                    {downloadedMetadata.length > 0 && (
-                      <button
-                        onClick={() => invoke("abrir_carpeta_descargas")}
-                        className="p-2 text-text-secondary hover:text-white rounded-lg hover:bg-white/10 transition relative group"
-                        title="Abrir carpeta de descargas"
-                      >
-                        <FolderOpen className="w-4 h-4" />
-                        <span className="absolute left-1/2 -translate-x-1/2 top-full mt-1 px-2 py-0.5 bg-surface-dark text-[10px] text-text-primary rounded-md whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
-                          Abrir carpeta
-                        </span>
-                      </button>
-                    )}
+                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3">
+                    <div className="relative flex-1 max-w-md">
+                      <Search className="w-4 h-4 text-text-secondary absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <input
+                        type="text"
+                        value={downloadSearchQuery}
+                        onChange={(e) => setDownloadSearchQuery(e.target.value)}
+                        placeholder="Buscar en descargas por título, artista o álbum..."
+                        className="w-full bg-surface-dark/70 border border-white/10 rounded-xl py-2 pl-9 pr-8 text-xs text-text-primary placeholder-text-secondary/60 focus:outline-none focus:border-brand-primary focus:ring-1 focus:ring-brand-primary transition duration-150"
+                      />
+                      {downloadSearchQuery.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setDownloadSearchQuery("")}
+                          className="absolute right-2.5 top-1/2 -translate-y-1/2 text-text-secondary hover:text-white transition p-0.5"
+                          title="Limpiar búsqueda"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      )}
+                    </div>
+
+                    <div className="flex items-center justify-between sm:justify-end gap-3 flex-shrink-0">
+                      <span className="text-xs text-text-secondary">
+                        {downloadSearchQuery.trim()
+                          ? `${filteredDownloadedMetadata.length} de ${downloadedMetadata.length} descargadas`
+                          : `${downloadedMetadata.length} canciones descargadas`}
+                      </span>
+                      {downloadedMetadata.length > 0 && (
+                        <button
+                          onClick={() => invoke("abrir_carpeta_descargas")}
+                          className="p-2 text-text-secondary hover:text-white rounded-lg hover:bg-white/10 transition relative group"
+                          title="Abrir carpeta de descargas"
+                        >
+                          <FolderOpen className="w-4 h-4" />
+                          <span className="absolute left-1/2 -translate-x-1/2 top-full mt-1 px-2 py-0.5 bg-surface-dark text-[10px] text-text-primary rounded-md whitespace-nowrap opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
+                            Abrir carpeta
+                          </span>
+                        </button>
+                      )}
+                    </div>
                   </div>
+
                   {downloadedMetadata.length > 0 ? (
-                    <div className="flex flex-col gap-2 w-full">
-                      {downloadedMetadata.map((track, idx) => (
+                    filteredDownloadedMetadata.length > 0 ? (
+                      <div className="flex flex-col gap-2 w-full">
+                        {filteredDownloadedMetadata.map((track, idx) => (
                         <div 
                           key={track.id}
                           draggable={!showSelectionMode}
@@ -5928,10 +6017,21 @@ function App() {
                       ))}
                     </div>
                   ) : (
-                    <div className="p-12 text-center bg-white/5 rounded-2xl border border-white/5">
-                      <p className="text-sm text-text-secondary">No tienes descargas locales.</p>
+                    <div className="p-12 text-center bg-white/5 rounded-2xl border border-white/5 space-y-2">
+                      <p className="text-sm text-text-secondary">No se encontraron descargas que coincidan con "{downloadSearchQuery}".</p>
+                      <button
+                        onClick={() => setDownloadSearchQuery("")}
+                        className="px-3 py-1.5 bg-brand-primary/20 hover:bg-brand-primary/30 text-brand-primary rounded-xl text-xs font-semibold transition"
+                      >
+                        Limpiar filtro
+                      </button>
                     </div>
-                  )}
+                  )
+                ) : (
+                  <div className="p-12 text-center bg-white/5 rounded-2xl border border-white/5">
+                    <p className="text-sm text-text-secondary">No tienes descargas locales.</p>
+                  </div>
+                )}
                 </div>
               )}
 
@@ -7482,8 +7582,10 @@ function App() {
                     { id: "apariencia", label: "Apariencia" },
                     { id: "reproduccion", label: "Reproducción" },
                     { id: "general", label: "General" },
+                    { id: "youtube", label: "YouTube Music" },
                     { id: "datos", label: "Datos" },
                     { id: "almacenamiento", label: "Almacenamiento" },
+                    { id: "mcp-ia", label: "Servidor MCP (IA)" },
                     { id: "acerca-de", label: "Acerca de" },
                   ].map((cat) => (
                     <button
@@ -8086,6 +8188,259 @@ function App() {
                       {!storageLoading && !storageInfo && (
                         <p className="text-xs text-text-secondary/60 text-center py-8">No se pudo obtener la información de almacenamiento.</p>
                       )}
+                    </div>
+                  )}
+
+                  {/* === YOUTUBE MUSIC (CUENTA Y SINCRONIZACIÓN) === */}
+                  {settingsCategory === "youtube" && (
+                    <div className="space-y-6">
+                      <div className="border-b border-white/5 pb-4">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <h3 className="font-semibold text-sm text-text-primary flex items-center gap-2">
+                              <YoutubeIcon className="w-5 h-5 text-red-500" /> Sincronización con YouTube Music
+                            </h3>
+                            <p className="text-xs text-text-secondary mt-1">
+                              Importa automáticamente todas tus playlists, canciones que te gustan y artistas suscritos directamente a Capi.
+                            </p>
+                          </div>
+                          {ytmAccount.loggedIn && (
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                              Conectado
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {ytmAccount.loggedIn ? (
+                        <div className="space-y-6">
+                          {/* Tarjeta de cuenta conectada */}
+                          <div className="p-5 rounded-2xl bg-gradient-to-r from-red-950/40 via-surface-dark/50 to-surface-dark/30 border border-red-500/20 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                            <div className="flex items-center gap-4">
+                              <div className="w-14 h-14 rounded-2xl overflow-hidden bg-red-600/20 border border-red-500/30 flex items-center justify-center flex-shrink-0">
+                                {ytmAccount.photo ? (
+                                  <img src={ytmAccount.photo} alt="YouTube Avatar" className="w-full h-full object-cover" />
+                                ) : (
+                                  <YoutubeIcon className="w-7 h-7 text-red-500" />
+                                )}
+                              </div>
+                              <div>
+                                <h4 className="font-bold text-white text-base">{ytmAccount.name || "Usuario de YouTube Music"}</h4>
+                                <p className="text-xs text-text-secondary mt-0.5">{ytmAccount.email || "Cuenta vinculada con éxito"}</p>
+                              </div>
+                            </div>
+                            <div className="flex items-center gap-2 self-end sm:self-auto flex-wrap">
+                              <button
+                                onClick={handleSyncYtm}
+                                disabled={isSyncingYtm}
+                                className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-semibold text-xs transition flex items-center gap-1.5 shadow-lg shadow-red-600/20 cursor-pointer disabled:opacity-50"
+                              >
+                                <RefreshCw className={`w-3.5 h-3.5 ${isSyncingYtm ? "animate-spin" : ""}`} />
+                                <span>{isSyncingYtm ? "Sincronizando..." : "Sincronizar ahora"}</span>
+                              </button>
+                              <button
+                                onClick={handleLogoutYtm}
+                                className="px-3 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-text-secondary hover:text-red-400 border border-white/10 text-xs font-semibold transition cursor-pointer"
+                              >
+                                Cerrar sesión
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Métricas de sincronización */}
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                            <div className="p-4 rounded-xl bg-surface-dark/40 border border-white/5 flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-xl bg-red-500/10 text-red-400 flex items-center justify-center flex-shrink-0">
+                                <ListMusic className="w-5 h-5" />
+                              </div>
+                              <div>
+                                <p className="text-xl font-bold text-text-primary">{ytmSyncData.playlists?.length || 0}</p>
+                                <p className="text-xs text-text-secondary">Playlists sincronizadas</p>
+                              </div>
+                            </div>
+                            <div className="p-4 rounded-xl bg-surface-dark/40 border border-white/5 flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-xl bg-red-500/10 text-red-400 flex items-center justify-center flex-shrink-0">
+                                <Heart className="w-5 h-5" />
+                              </div>
+                              <div>
+                                <p className="text-xl font-bold text-text-primary">{ytmSyncData.likedSongs?.length || 0}</p>
+                                <p className="text-xs text-text-secondary">Canciones que te gustan</p>
+                              </div>
+                            </div>
+                            <div className="p-4 rounded-xl bg-surface-dark/40 border border-white/5 flex items-center gap-3">
+                              <div className="w-10 h-10 rounded-xl bg-red-500/10 text-red-400 flex items-center justify-center flex-shrink-0">
+                                <Users className="w-5 h-5" />
+                              </div>
+                              <div>
+                                <p className="text-xl font-bold text-text-primary">{ytmSyncData.artists?.length || 0}</p>
+                                <p className="text-xs text-text-secondary">Artistas suscritos</p>
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="space-y-6">
+                          <div className="p-6 rounded-2xl bg-gradient-to-r from-red-950/30 via-surface-dark/50 to-surface-dark/30 border border-red-500/20 flex flex-col md:flex-row items-center justify-between gap-6">
+                            <div className="flex items-center gap-4">
+                              <div className="w-14 h-14 rounded-2xl bg-red-600/20 border border-red-500/30 flex items-center justify-center text-red-500 flex-shrink-0">
+                                <YoutubeIcon className="w-8 h-8" />
+                              </div>
+                              <div>
+                                <h4 className="font-bold text-white text-base">Inicia sesión con tu cuenta de YouTube Music</h4>
+                                <p className="text-xs text-text-secondary mt-1 max-w-lg leading-relaxed">
+                                  Al iniciar sesión, Capi extraerá y sincronizará de forma automática tus playlists creadas, tus canciones favoritas y tus artistas suscritos, igual que en la app de Android.
+                                </p>
+                              </div>
+                            </div>
+                            <button
+                              onClick={handleOpenYtmLoginWindow}
+                              className="w-full md:w-auto px-6 py-3 rounded-2xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs transition flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 cursor-pointer flex-shrink-0"
+                            >
+                              <YoutubeIcon className="w-4 h-4" />
+                              <span>Iniciar sesión con Google</span>
+                            </button>
+                          </div>
+
+                          {/* Entrada manual alternativa */}
+                          <div className="p-4 rounded-xl bg-surface-dark/30 border border-white/5 space-y-3">
+                            <h4 className="text-xs font-semibold text-text-primary flex items-center gap-1.5">
+                              <Key className="w-3.5 h-3.5 text-text-secondary" /> Método alternativo: Pegar Cookie manualmente
+                            </h4>
+                            <p className="text-[11px] text-text-secondary">
+                              Si prefieres no usar la ventana integrada de Google, puedes extraer tus cookies de music.youtube.com y pegarlas aquí:
+                            </p>
+                            <div className="flex gap-2">
+                              <input
+                                type="password"
+                                value={ytmCookieInput}
+                                onChange={(e) => setYtmCookieInput(e.target.value)}
+                                placeholder="SAPISID=...; SSID=...; HSID=..."
+                                className="flex-1 bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-xs text-white placeholder-text-secondary/50 focus:outline-none focus:border-red-500 font-mono"
+                              />
+                              <button
+                                onClick={handleSaveYtmCookie}
+                                disabled={!ytmCookieInput.trim()}
+                                className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-semibold transition cursor-pointer disabled:opacity-40"
+                              >
+                                Guardar
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* === SERVIDOR MCP (IA) === */}
+                  {settingsCategory === "mcp-ia" && (
+                    <div className="space-y-6">
+                      <div className="border-b border-white/5 pb-4">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <h3 className="font-semibold text-sm text-text-primary flex items-center gap-2">
+                              <Sparkles className="w-4 h-4 text-brand-primary" /> Servidor MCP Interno (Model Context Protocol)
+                            </h3>
+                            <p className="text-xs text-text-secondary mt-1">
+                              Conecta Capi directamente a Claude Desktop, Cursor, Antigravity y cualquier herramienta de IA para controlar toda la app.
+                            </p>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                              <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                              Activo (Puerto {mcpInfo?.port || 19840})
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        <div className="p-4 rounded-xl bg-surface-dark/50 border border-white/5 space-y-2">
+                          <p className="text-xs font-semibold text-text-secondary uppercase tracking-wider">Endpoint HTTP (JSON-RPC 2.0)</p>
+                          <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-black/40 font-mono text-xs text-text-primary">
+                            <span className="truncate">{mcpInfo?.httpUrl || "http://127.0.0.1:19840/mcp"}</span>
+                            <button
+                              onClick={() => {
+                                navigator.clipboard.writeText(mcpInfo?.httpUrl || "http://127.0.0.1:19840/mcp");
+                                showToast("URL HTTP copiada al portapapeles");
+                              }}
+                              className="p-1 hover:text-brand-primary transition cursor-pointer"
+                              title="Copiar URL"
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        <div className="p-4 rounded-xl bg-surface-dark/50 border border-white/5 space-y-2">
+                          <p className="text-xs font-semibold text-text-secondary uppercase tracking-wider">Endpoint SSE (Server-Sent Events)</p>
+                          <div className="flex items-center justify-between gap-2 p-2 rounded-lg bg-black/40 font-mono text-xs text-text-primary">
+                            <span className="truncate">{mcpInfo?.sseUrl || "http://127.0.0.1:19840/sse"}</span>
+                            <button
+                              onClick={() => {
+                                navigator.clipboard.writeText(mcpInfo?.sseUrl || "http://127.0.0.1:19840/sse");
+                                showToast("URL SSE copiada al portapapeles");
+                              }}
+                              className="p-1 hover:text-brand-primary transition cursor-pointer"
+                              title="Copiar URL"
+                            >
+                              <Copy className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {/* Configuración 1-clic */}
+                      <div className="p-4 rounded-xl bg-surface-dark/50 border border-white/5 space-y-3">
+                        <div className="flex items-center justify-between">
+                          <h4 className="text-xs font-semibold text-text-primary">Configuración para Claude Desktop / Cursor</h4>
+                          <button
+                            onClick={() => {
+                              const sseUrl = mcpInfo?.sseUrl || "http://127.0.0.1:19840/sse";
+                              const conf = JSON.stringify({
+                                mcpServers: {
+                                  capi: {
+                                    url: sseUrl
+                                  }
+                                }
+                              }, null, 2);
+                              navigator.clipboard.writeText(conf);
+                              showToast("Configuración MCP copiada para Claude / Cursor");
+                            }}
+                            className="px-3 py-1.5 bg-brand-primary/20 hover:bg-brand-primary/30 text-brand-primary rounded-lg text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer"
+                          >
+                            <Copy className="w-3.5 h-3.5" /> Copiar Configuración JSON
+                          </button>
+                        </div>
+                        <pre className="p-3 bg-black/40 rounded-lg text-xs font-mono text-text-secondary overflow-x-auto">
+{JSON.stringify({
+  mcpServers: {
+    capi: {
+      url: mcpInfo?.sseUrl || "http://127.0.0.1:19840/sse"
+    }
+  }
+}, null, 2)}
+                        </pre>
+                      </div>
+
+                      {/* Herramientas disponibles */}
+                      <div className="space-y-3">
+                        <h4 className="text-xs font-semibold text-text-primary">Herramientas MCP disponibles ({mcpInfo?.toolsCount || 22}):</h4>
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
+                          {[
+                            "capi_play_track", "capi_pause", "capi_play", "capi_next", "capi_previous",
+                            "capi_set_volume", "capi_seek", "capi_get_player_state", "capi_search",
+                            "capi_get_lyrics", "capi_get_playlists", "capi_get_playlist_tracks",
+                            "capi_play_playlist", "capi_get_liked_songs", "capi_like_track",
+                            "capi_sync_youtube", "capi_get_downloads", "capi_download_track",
+                            "capi_get_account_info", "capi_navigate", "capi_show_toast"
+                          ].map(t => (
+                            <span key={t} className="px-2.5 py-1.5 bg-white/5 rounded-lg text-[11px] font-mono text-text-secondary border border-white/5">
+                              {t}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
                     </div>
                   )}
 

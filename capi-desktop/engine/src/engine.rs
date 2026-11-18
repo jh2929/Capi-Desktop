@@ -128,6 +128,10 @@ impl Engine {
         self.ytm.full_sync().await
     }
 
+    pub async fn ytm_playlist_tracks(&self, id: &str) -> Result<Vec<Song>, EngineError> {
+        self.ytm.fetch_playlist_tracks(id).await
+    }
+
     // ─── Catálogo ─────────────────────────────────────────────────────
 
     pub async fn search(&self, query: &str) -> Result<Vec<Song>, EngineError> {
@@ -244,12 +248,22 @@ impl Engine {
 
     /// Acepta IDs de playlist (`PL…`, `VLPL…`, `RDCLAK…`) o de álbum (`MPREb…`).
     pub async fn playlist_tracks(&self, id: &str) -> Result<Vec<Song>, EngineError> {
-        let id = strip_vl(id);
-        if id.starts_with("MPREb") {
-            return self.album_tracks(id).await;
+        let clean_id = strip_vl(id);
+        if clean_id.starts_with("MPREb") {
+            return self.album_tracks(clean_id).await;
         }
+
+        // Si el usuario tiene sesión activa en YouTube Music, intentar obtener la playlist autenticada primero (para playlists privadas/personales)
+        if self.ytm.is_logged_in().await {
+            if let Ok(tracks) = self.ytm.fetch_playlist_tracks(clean_id).await {
+                if !tracks.is_empty() {
+                    return Ok(tracks);
+                }
+            }
+        }
+
         let playlist = self
-            .with_timeout(self.rp.query().music_playlist(id))
+            .with_timeout(self.rp.query().music_playlist(clean_id))
             .await?;
         Ok(playlist.tracks.items.iter().map(song_from_track).collect())
     }

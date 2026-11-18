@@ -209,6 +209,9 @@ impl YtmClient {
     }
 
     fn build_context_json(&self, session: &YtmSession) -> Value {
+        let on_behalf_of = session.data_sync_id.as_deref().map(|id| {
+            id.split("||").next().unwrap_or(id).trim()
+        });
         serde_json::json!({
             "client": {
                 "clientName": "WEB_REMIX",
@@ -218,7 +221,9 @@ impl YtmClient {
                 "visitorData": session.visitor_data
             },
             "user": {
-                "dataSyncId": session.data_sync_id
+                "onBehalfOfUser": on_behalf_of,
+                "dataSyncId": on_behalf_of,
+                "lockedSafetyMode": false
             }
         })
     }
@@ -505,17 +510,19 @@ impl YtmClient {
             ));
         }
 
-        let body = serde_json::json!({
-            "context": self.build_context_json(&session),
-            "browseId": "LM"
-        });
+        let context_json = self.build_context_json(&session);
         let headers = self.build_headers(&session);
         drop(session);
+
+        let body = serde_json::json!({
+            "context": context_json,
+            "browseId": "LM"
+        });
 
         let response = self
             .http
             .post("https://music.youtube.com/youtubei/v1/browse")
-            .headers(headers)
+            .headers(headers.clone())
             .json(&body)
             .send()
             .await
@@ -530,6 +537,44 @@ impl YtmClient {
 
         let mut songs = Vec::new();
         collect_songs_from_browse(&json, &mut songs);
+
+        // Continuación para páginas adicionales de favoritos (hasta 15 páginas)
+        let mut continuation = find_continuation_token(&json);
+        let mut pages = 0;
+        while let Some(token) = continuation {
+            if pages >= 15 {
+                break;
+            }
+            pages += 1;
+
+            let cont_body = serde_json::json!({
+                "context": context_json,
+                "continuation": token
+            });
+
+            if let Ok(cont_resp) = self
+                .http
+                .post("https://music.youtube.com/youtubei/v1/browse")
+                .headers(headers.clone())
+                .json(&cont_body)
+                .send()
+                .await
+            {
+                if let Ok(cont_json) = cont_resp.json::<Value>().await {
+                    let prev_count = songs.len();
+                    collect_songs_from_browse(&cont_json, &mut songs);
+                    continuation = find_continuation_token(&cont_json);
+                    if songs.len() == prev_count {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
         Ok(songs)
     }
 
@@ -569,6 +614,43 @@ impl YtmClient {
         let mut playlists = Vec::new();
         collect_playlists_from_browse(&json, &mut playlists);
 
+        // Continuación para páginas adicionales de playlists
+        let mut continuation = find_continuation_token(&json);
+        let mut pages = 0;
+        while let Some(token) = continuation {
+            if pages >= 25 {
+                break;
+            }
+            pages += 1;
+
+            let cont_body = serde_json::json!({
+                "context": context_json,
+                "continuation": token
+            });
+
+            if let Ok(cont_resp) = self
+                .http
+                .post("https://music.youtube.com/youtubei/v1/browse")
+                .headers(headers.clone())
+                .json(&cont_body)
+                .send()
+                .await
+            {
+                if let Ok(cont_json) = cont_resp.json::<Value>().await {
+                    let prev_count = playlists.len();
+                    collect_playlists_from_browse(&cont_json, &mut playlists);
+                    continuation = find_continuation_token(&cont_json);
+                    if playlists.len() == prev_count {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
         // Fallback: si FEmusic_liked_playlists no devuelve listas, consultar FEmusic_library_landing
         if playlists.is_empty() {
             let body_landing = serde_json::json!({
@@ -578,7 +660,7 @@ impl YtmClient {
             if let Ok(resp_landing) = self
                 .http
                 .post("https://music.youtube.com/youtubei/v1/browse")
-                .headers(headers)
+                .headers(headers.clone())
                 .json(&body_landing)
                 .send()
                 .await
@@ -589,7 +671,93 @@ impl YtmClient {
             }
         }
 
+        // Normalizar IDs y filtrar playlists duplicadas o no deseadas (LM / SE)
+        playlists.retain(|p| p.id != "LM" && p.id != "SE" && !p.title.trim().is_empty());
+
         Ok(playlists)
+    }
+
+    // ─── Obtener canciones de una playlist autenticada ────────────────
+
+    pub async fn fetch_playlist_tracks(&self, playlist_id: &str) -> Result<Vec<Song>, EngineError> {
+        let session = self.session.read().await;
+        if extract_sapisid(&session.cookie).is_none() {
+            return Err(EngineError::Unavailable(
+                "Inicia sesión para sincronizar la playlist con tu cuenta.".into(),
+            ));
+        }
+
+        let clean_id = strip_vl(playlist_id);
+        let browse_id = if clean_id.starts_with("VL") {
+            clean_id.to_string()
+        } else {
+            format!("VL{}", clean_id)
+        };
+
+        let context_json = self.build_context_json(&session);
+        let headers = self.build_headers(&session);
+        drop(session);
+
+        let body = serde_json::json!({
+            "context": context_json,
+            "browseId": browse_id
+        });
+
+        let response = self
+            .http
+            .post("https://music.youtube.com/youtubei/v1/browse")
+            .headers(headers.clone())
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EngineError::Network(format!("Error al obtener playlist autenticada: {e}")))?;
+
+        let json: Value = response
+            .json()
+            .await
+            .map_err(|e| EngineError::Network(e.to_string()))?;
+
+        let mut songs = Vec::new();
+        collect_songs_from_browse(&json, &mut songs);
+
+        // Seguir continuaciones si la playlist tiene más de 100 canciones
+        let mut continuation = find_continuation_token(&json);
+        let mut pages = 0;
+        while let Some(token) = continuation {
+            if pages >= 25 {
+                break;
+            }
+            pages += 1;
+
+            let cont_body = serde_json::json!({
+                "context": context_json,
+                "continuation": token
+            });
+
+            if let Ok(cont_resp) = self
+                .http
+                .post("https://music.youtube.com/youtubei/v1/browse")
+                .headers(headers.clone())
+                .json(&cont_body)
+                .send()
+                .await
+            {
+                if let Ok(cont_json) = cont_resp.json::<Value>().await {
+                    let prev_count = songs.len();
+                    collect_songs_from_browse(&cont_json, &mut songs);
+                    continuation = find_continuation_token(&cont_json);
+                    if songs.len() == prev_count {
+                        break;
+                    }
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        Ok(songs)
     }
 
     // ─── Sincronización: Artistas Suscritos ───────────────────────────
@@ -645,6 +813,37 @@ impl YtmClient {
 }
 
 // ─── Helpers de Hash y Parsing ────────────────────────────────────────
+
+pub fn strip_vl(id: &str) -> &str {
+    id.strip_prefix("VL").unwrap_or(id)
+}
+
+fn find_continuation_token(val: &Value) -> Option<String> {
+    if let Value::Object(map) = val {
+        if let Some(next_c) = map.get("nextContinuationData") {
+            if let Some(token) = next_c["continuation"].as_str() {
+                return Some(token.to_string());
+            }
+        }
+        if let Some(reload_c) = map.get("reloadContinuationData") {
+            if let Some(token) = reload_c["continuation"].as_str() {
+                return Some(token.to_string());
+            }
+        }
+        for (_, v) in map {
+            if let Some(token) = find_continuation_token(v) {
+                return Some(token);
+            }
+        }
+    } else if let Value::Array(arr) = val {
+        for v in arr {
+            if let Some(token) = find_continuation_token(v) {
+                return Some(token);
+            }
+        }
+    }
+    None
+}
 
 pub fn extract_sapisid(cookie: &str) -> Option<&str> {
     let mut fallback = None;
@@ -823,10 +1022,15 @@ fn collect_playlists_from_browse(val: &Value, playlists: &mut Vec<YtmPlaylist>) 
 }
 
 fn parse_playlist_two_row(r: &Value) -> Option<YtmPlaylist> {
-    let browse_id = r["navigationEndpoint"]["browseEndpoint"]["browseId"]
+    let raw_browse_id = r["navigationEndpoint"]["browseEndpoint"]["browseId"]
         .as_str()
         .or_else(|| r["navigationEndpoint"]["watchEndpoint"]["playlistId"].as_str())?
         .to_string();
+
+    let clean_id = strip_vl(&raw_browse_id).to_string();
+    if clean_id == "LM" || clean_id == "SE" {
+        return None;
+    }
 
     let title = r["title"]["runs"]
         .as_array()
@@ -855,7 +1059,7 @@ fn parse_playlist_two_row(r: &Value) -> Option<YtmPlaylist> {
     });
 
     Some(YtmPlaylist {
-        id: browse_id,
+        id: clean_id,
         title,
         thumbnail,
         song_count,
@@ -864,13 +1068,18 @@ fn parse_playlist_two_row(r: &Value) -> Option<YtmPlaylist> {
 }
 
 fn parse_playlist_responsive(r: &Value) -> Option<YtmPlaylist> {
-    let browse_id = r["navigationEndpoint"]["browseEndpoint"]["browseId"]
+    let raw_browse_id = r["navigationEndpoint"]["browseEndpoint"]["browseId"]
         .as_str()
         .or_else(|| r["playlistItemData"]["playlistId"].as_str())
         .or_else(|| r["navigationEndpoint"]["watchEndpoint"]["playlistId"].as_str())?
         .to_string();
 
-    if !browse_id.starts_with("VL") && !browse_id.starts_with("PL") && !browse_id.starts_with("RD")
+    let clean_id = strip_vl(&raw_browse_id).to_string();
+    if clean_id == "LM" || clean_id == "SE" {
+        return None;
+    }
+
+    if !raw_browse_id.starts_with("VL") && !clean_id.starts_with("PL") && !clean_id.starts_with("RD")
     {
         return None;
     }
@@ -912,7 +1121,7 @@ fn parse_playlist_responsive(r: &Value) -> Option<YtmPlaylist> {
     });
 
     Some(YtmPlaylist {
-        id: browse_id,
+        id: clean_id,
         title,
         thumbnail,
         song_count,
