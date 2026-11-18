@@ -3023,9 +3023,24 @@ async fn abrir_login_ytm(
     app: tauri::AppHandle,
     engine: tauri::State<'_, Arc<Engine>>,
 ) -> Result<(), String> {
-    if let Some(win) = app.get_webview_window("login-ytm") {
-        let _ = win.close();
+    // Si ya existe una ventana de login abierta y visible, traerla al frente
+    for (label, win) in app.webview_windows() {
+        if label.starts_with("login-ytm") {
+            if win.is_visible().unwrap_or(false) {
+                let _ = win.unminimize();
+                let _ = win.set_focus();
+                return Ok(());
+            } else {
+                let _ = win.destroy();
+            }
+        }
     }
+
+    let win_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let win_label = format!("login-ytm-{}", win_id);
 
     let login_url =
         "https://accounts.google.com/ServiceLogin?continue=https%3A%2F%2Fmusic.youtube.com";
@@ -3035,6 +3050,8 @@ async fn abrir_login_ytm(
     let engine_clone_nav = engine.inner().clone();
     let rt_handle = tokio::runtime::Handle::current();
     let rt_handle_nav = rt_handle.clone();
+    let win_label_nav = win_label.clone();
+    let win_label_monitor = win_label.clone();
 
     let init_script = r#"
         (function() {
@@ -3076,7 +3093,7 @@ async fn abrir_login_ytm(
 
     let _win = WebviewWindowBuilder::new(
         &app,
-        "login-ytm",
+        &win_label,
         tauri::WebviewUrl::External(reqwest::Url::parse(login_url).map_err(|e| e.to_string())?),
     )
     .title("Iniciar sesión en YouTube Music - Capi")
@@ -3091,6 +3108,7 @@ async fn abrir_login_ytm(
                     if !auth_done_nav.swap(true, std::sync::atomic::Ordering::SeqCst) {
                         let app_h = app_clone_nav.clone();
                         let eng = engine_clone_nav.clone();
+                        let w_lbl = win_label_nav.clone();
                         rt_handle_nav.spawn(async move {
                             #[derive(serde::Deserialize)]
                             struct AuthPayload {
@@ -3105,7 +3123,7 @@ async fn abrir_login_ytm(
                                         cookie_map.insert(k.trim().to_string(), v.trim().to_string());
                                     }
                                 }
-                                if let Some(w) = app_h.get_webview_window("login-ytm") {
+                                if let Some(w) = app_h.get_webview_window(&w_lbl) {
                                     if let Ok(native_cookies) = w.cookies() {
                                         for c in native_cookies {
                                             cookie_map.insert(c.name().to_string(), c.value().to_string());
@@ -3139,8 +3157,8 @@ async fn abrir_login_ytm(
                                     }
                                 }
                             }
-                            if let Some(w) = app_h.get_webview_window("login-ytm") {
-                                let _ = w.close();
+                            if let Some(w) = app_h.get_webview_window(&w_lbl) {
+                                let _ = w.destroy();
                             }
                         });
                     }
@@ -3167,7 +3185,7 @@ async fn abrir_login_ytm(
                 break;
             }
 
-            let current_win = match app_clone.get_webview_window("login-ytm") {
+            let current_win = match app_clone.get_webview_window(&win_label_monitor) {
                 Some(w) => w,
                 None => {
                     // Ventana cerrada por el usuario antes de autenticarse
