@@ -779,7 +779,17 @@ function App() {
   }
   const [ytmSyncData, setYtmSyncData] = useState<YtmSyncDataState>(() => {
     const saved = localStorage.getItem("capi_ytm_sync_data");
-    return safeJsonParse<YtmSyncDataState>(saved, { likedSongs: [], playlists: [], artists: [] });
+    const parsed = safeJsonParse<YtmSyncDataState>(saved, { likedSongs: [], playlists: [], artists: [] });
+    if (Array.isArray(parsed.playlists)) {
+      parsed.playlists = parsed.playlists.map(pl => {
+        let tracks = pl.tracks;
+        if (tracks && pl.songCount && pl.songCount > 0 && tracks.length > pl.songCount) {
+          tracks = tracks.slice(0, pl.songCount);
+        }
+        return { ...pl, tracks };
+      });
+    }
+    return parsed;
   });
 
   const [showChannelSubscribeModal, setShowChannelSubscribeModal] = useState(false);
@@ -890,9 +900,12 @@ function App() {
       if (Array.isArray(data.playlists)) {
         for (const p of data.playlists) {
           const cleanId = p.id.startsWith("ytm-") ? p.id.slice(4) : p.id;
-          const mapped = (p.tracks || []).map(convertYTItemToTrack);
+          let mapped = (p.tracks || []).map(convertYTItemToTrack);
+          if (p.songCount && p.songCount > 0 && mapped.length > p.songCount) {
+            mapped = mapped.slice(0, p.songCount);
+          }
           if (mapped.length > 0) {
-            localStorage.setItem("capi_ytm_pl_tracks_" + cleanId, JSON.stringify(mapped));
+            localStorage.setItem("capi_ytm_pl_v2_" + cleanId, JSON.stringify(mapped));
           }
         }
       }
@@ -908,7 +921,10 @@ function App() {
         }
         // Incorporar o actualizar las playlists de la cuenta actual con sus pistas exactas
         for (const p of rawNewPlaylists) {
-          const mapped = (p.tracks || []).map(convertYTItemToTrack);
+          let mapped = (p.tracks || []).map(convertYTItemToTrack);
+          if (p.songCount && p.songCount > 0 && mapped.length > p.songCount) {
+            mapped = mapped.slice(0, p.songCount);
+          }
           playlistMap.set(p.id, {
             ...p,
             tracks: mapped,
@@ -918,8 +934,9 @@ function App() {
         const mergedPlaylists = Array.from(playlistMap.values());
         totalSyncedPlaylists = mergedPlaylists.length;
 
-        const mergedLikedSongs = Array.isArray(data.likedSongs) && data.likedSongs.length > 0
-          ? data.likedSongs
+        const mappedLiked = Array.isArray(data.likedSongs) ? data.likedSongs.map(convertYTItemToTrack) : [];
+        const mergedLikedSongs = mappedLiked.length > 0
+          ? mappedLiked
           : prev.likedSongs;
 
         const mergedArtists = Array.isArray(data.artists) && data.artists.length > 0
@@ -1022,17 +1039,43 @@ function App() {
     }
   };
 
-  const getYtmCachedPlaylistTracks = (playlistId: string): Track[] => {
+  const getYtmCachedPlaylistTracks = (playlistId: string, maxExpectedCount?: number): Track[] => {
     const cleanId = playlistId.startsWith("ytm-") ? playlistId.slice(4) : playlistId;
-    return safeJsonParse<Track[]>(localStorage.getItem("capi_ytm_pl_tracks_" + cleanId), []);
+    let tracks = safeJsonParse<Track[]>(localStorage.getItem("capi_ytm_pl_v2_" + cleanId), []);
+    if (tracks.length === 0 && ytmSyncData.playlists) {
+      const foundPl = ytmSyncData.playlists.find(p => p.id === cleanId || "ytm-" + p.id === playlistId);
+      if (foundPl?.tracks && foundPl.tracks.length > 0) {
+        tracks = foundPl.tracks;
+        localStorage.setItem("capi_ytm_pl_v2_" + cleanId, JSON.stringify(tracks));
+      }
+    }
+    const countLimit = maxExpectedCount || ytmSyncData.playlists?.find(p => p.id === cleanId || "ytm-" + p.id === playlistId)?.songCount;
+    if (countLimit && countLimit > 0 && tracks.length > countLimit) {
+      tracks = tracks.slice(0, countLimit);
+      localStorage.setItem("capi_ytm_pl_v2_" + cleanId, JSON.stringify(tracks));
+    }
+    return tracks;
   };
 
   const openYtmPlaylist = useCallback((p: { id: string; title: string; thumbnail?: string; songCount?: number; tracks?: Track[] }) => {
     const cleanId = p.id.startsWith("ytm-") ? p.id.slice(4) : p.id;
-    const cacheKey = "capi_ytm_pl_tracks_" + cleanId;
-    const tracksToUse = (p.tracks && p.tracks.length > 0)
+    const cacheKey = "capi_ytm_pl_v2_" + cleanId;
+    let tracksToUse = (p.tracks && p.tracks.length > 0)
       ? p.tracks
       : safeJsonParse<Track[]>(localStorage.getItem(cacheKey), []);
+
+    if (tracksToUse.length === 0 && ytmSyncData.playlists) {
+      const found = ytmSyncData.playlists.find(pl => pl.id === cleanId);
+      if (found?.tracks && found.tracks.length > 0) {
+        tracksToUse = found.tracks;
+      }
+    }
+
+    const countLimit = p.songCount || ytmSyncData.playlists?.find(pl => pl.id === cleanId)?.songCount;
+    if (countLimit && countLimit > 0 && tracksToUse.length > countLimit) {
+      tracksToUse = tracksToUse.slice(0, countLimit);
+      localStorage.setItem(cacheKey, JSON.stringify(tracksToUse));
+    }
 
     // Carga 100% instantánea sin spinner ni esperas
     setSelectedYtmPlaylist({
@@ -1050,22 +1093,36 @@ function App() {
         .then(res => {
           const parsed = JSON.parse(res);
           const rawTracks = Array.isArray(parsed) ? parsed : (parsed.tracks || []);
-          const mappedTracks = rawTracks.map(convertYTItemToTrack);
+          let mappedTracks = rawTracks.map(convertYTItemToTrack);
+          if (countLimit && countLimit > 0 && mappedTracks.length > countLimit) {
+            mappedTracks = mappedTracks.slice(0, countLimit);
+          }
           if (mappedTracks.length > 0) {
             localStorage.setItem(cacheKey, JSON.stringify(mappedTracks));
             setSelectedYtmPlaylist(prev => prev && prev.id === "ytm-" + cleanId ? { ...prev, tracks: mappedTracks } : prev);
+            setYtmSyncData(prev => ({
+              ...prev,
+              playlists: prev.playlists.map(pl =>
+                pl.id === cleanId ? { ...pl, tracks: mappedTracks, songCount: mappedTracks.length } : pl
+              )
+            }));
           }
         })
         .catch(() => {});
     }
-  }, []);
+  }, [navigateTo, ytmSyncData.playlists]);
 
-  const playYtmPlaylistDirectly = useCallback((p: { id: string; title?: string; tracks?: Track[] }) => {
+  const playYtmPlaylistDirectly = useCallback((p: { id: string; title?: string; songCount?: number; tracks?: Track[] }) => {
     const cleanId = p.id.startsWith("ytm-") ? p.id.slice(4) : p.id;
-    const cacheKey = "capi_ytm_pl_tracks_" + cleanId;
-    const tracksToUse = (p.tracks && p.tracks.length > 0)
+    const cacheKey = "capi_ytm_pl_v2_" + cleanId;
+    let tracksToUse = (p.tracks && p.tracks.length > 0)
       ? p.tracks
       : safeJsonParse<Track[]>(localStorage.getItem(cacheKey), []);
+
+    const countLimit = p.songCount || ytmSyncData.playlists?.find(pl => pl.id === cleanId)?.songCount;
+    if (countLimit && countLimit > 0 && tracksToUse.length > countLimit) {
+      tracksToUse = tracksToUse.slice(0, countLimit);
+    }
 
     if (tracksToUse.length > 0) {
       playTrack(tracksToUse[0], tracksToUse);
@@ -1078,7 +1135,10 @@ function App() {
       .then(res => {
         const parsed = JSON.parse(res);
         const rawTracks = Array.isArray(parsed) ? parsed : (parsed.tracks || []);
-        const mappedTracks = rawTracks.map(convertYTItemToTrack);
+        let mappedTracks = rawTracks.map(convertYTItemToTrack);
+        if (countLimit && countLimit > 0 && mappedTracks.length > countLimit) {
+          mappedTracks = mappedTracks.slice(0, countLimit);
+        }
         if (mappedTracks.length > 0) {
           localStorage.setItem(cacheKey, JSON.stringify(mappedTracks));
           playTrack(mappedTracks[0], mappedTracks);
@@ -1088,7 +1148,8 @@ function App() {
         }
       })
       .catch(e => showToast("Error al reproducir playlist: " + e));
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showToast, ytmSyncData.playlists]);
 
   useEffect(() => {
     invoke<string>("obtener_estado_sesion_ytm")
@@ -1115,6 +1176,18 @@ function App() {
       })
       .catch(() => {});
 
+    // Limpieza de caches antiguas o corruptas (versión anterior no acotada)
+    try {
+      const oldKeys: string[] = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && k.startsWith("capi_ytm_pl_tracks_")) {
+          oldKeys.push(k);
+        }
+      }
+      oldKeys.forEach(k => localStorage.removeItem(k));
+    } catch {}
+
     loadCapiPlaylists();
 
     const unlistenAuth = listen<{ success: boolean; name?: string; email?: string; message?: string; cancelled?: boolean }>(
@@ -1140,9 +1213,27 @@ function App() {
       (event) => {
         const data = event.payload;
         if (data) {
+          const rawPlaylists = Array.isArray(data.playlists) ? data.playlists : [];
+          const processedPlaylists = rawPlaylists.map((p: any) => {
+            const cleanId = p.id.startsWith("ytm-") ? p.id.slice(4) : p.id;
+            let mapped = (p.tracks || []).map(convertYTItemToTrack);
+            if (p.songCount && p.songCount > 0 && mapped.length > p.songCount) {
+              mapped = mapped.slice(0, p.songCount);
+            }
+            if (mapped.length > 0) {
+              localStorage.setItem("capi_ytm_pl_v2_" + cleanId, JSON.stringify(mapped));
+            }
+            return {
+              ...p,
+              tracks: mapped,
+              songCount: mapped.length > 0 ? mapped.length : p.songCount,
+            };
+          });
+
+          const mappedLiked = Array.isArray(data.likedSongs) ? data.likedSongs.map(convertYTItemToTrack) : [];
           const syncObj: YtmSyncDataState = {
-            likedSongs: Array.isArray(data.likedSongs) ? data.likedSongs : [],
-            playlists: Array.isArray(data.playlists) ? data.playlists : [],
+            likedSongs: mappedLiked,
+            playlists: processedPlaylists,
             artists: Array.isArray(data.artists) ? data.artists : [],
           };
           setYtmSyncData(syncObj);
@@ -3474,6 +3565,7 @@ function App() {
         localStorage.setItem("capi_ytm_sync_data", JSON.stringify(updated));
         return updated;
       });
+      localStorage.removeItem("capi_ytm_pl_v2_" + rawId);
       localStorage.removeItem("capi_ytm_pl_tracks_" + rawId);
       if (selectedPlaylistId === id) setSelectedPlaylistId(null);
       showToast("Playlist de YouTube eliminada de tu biblioteca.");
@@ -3523,10 +3615,16 @@ function App() {
     if (activeTab === "album_view") return currentAlbumTracks;
     if (activeTab === "playlists") {
       if (selectedPlaylistId === "ytm-liked-songs") return ytmSyncData.likedSongs || [];
-      if (selectedYtmPlaylist && selectedPlaylistId === selectedYtmPlaylist.id) return selectedYtmPlaylist.tracks || [];
       if (selectedPlaylistId?.startsWith("ytm-")) {
-        const cached = getYtmCachedPlaylistTracks(selectedPlaylistId);
-        if (cached.length > 0) return cached;
+        const cleanId = selectedPlaylistId.slice(4);
+        const ytmPl = ytmSyncData.playlists?.find(p => p.id === cleanId);
+        let trks = (selectedYtmPlaylist && selectedYtmPlaylist.id === selectedPlaylistId && selectedYtmPlaylist.tracks && selectedYtmPlaylist.tracks.length > 0)
+          ? selectedYtmPlaylist.tracks
+          : getYtmCachedPlaylistTracks(selectedPlaylistId, ytmPl?.songCount);
+        if (ytmPl?.songCount && ytmPl.songCount > 0 && trks.length > ytmPl.songCount) {
+          trks = trks.slice(0, ytmPl.songCount);
+        }
+        return trks;
       }
       return playlists.find(p => p.id === selectedPlaylistId)?.tracks || capiPlaylists.find(p => p.id === selectedPlaylistId)?.tracks || [];
     }
@@ -6444,6 +6542,10 @@ function App() {
                                 className="w-full h-full object-cover group-hover:scale-105 transition duration-300"
                               />
                               <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors" />
+                              {/* Etiqueta mínima: solo el logo de YouTube */}
+                              <div className="absolute top-2 left-2 w-6 h-6 rounded-lg bg-black/75 backdrop-blur-md flex items-center justify-center border border-white/10 shadow-md pointer-events-none" title="YouTube Music">
+                                <YoutubeIcon className="w-3.5 h-3.5 text-red-500 fill-current" />
+                              </div>
                               <button
                                 onClick={(e) => {
                                   e.stopPropagation();
@@ -6525,8 +6627,17 @@ function App() {
                     );
                     const isCapiSmart = capiPlaylists.some(p => p.id === selectedPlaylistId);
                     const capiSmartPl = capiPlaylists.find(p => p.id === selectedPlaylistId);
-                    const ytmPl = ytmSyncData.playlists?.find(p => "ytm-" + p.id === selectedPlaylistId);
-                    const cachedTracks = selectedPlaylistId ? getYtmCachedPlaylistTracks(selectedPlaylistId) : [];
+                    const ytmPl = ytmSyncData.playlists?.find(p => "ytm-" + p.id === selectedPlaylistId || p.id === selectedPlaylistId?.replace(/^ytm-/, ""));
+                    const cachedTracks = selectedPlaylistId ? getYtmCachedPlaylistTracks(selectedPlaylistId, ytmPl?.songCount) : [];
+
+                    let ytmTracks = (selectedYtmPlaylist && (selectedYtmPlaylist.id === selectedPlaylistId || selectedYtmPlaylist.id === "ytm-" + selectedPlaylistId?.replace(/^ytm-/, "")) && selectedYtmPlaylist.tracks && selectedYtmPlaylist.tracks.length > 0)
+                      ? selectedYtmPlaylist.tracks
+                      : cachedTracks;
+
+                    const countLimit = ytmPl?.songCount;
+                    if (countLimit && countLimit > 0 && ytmTracks.length > countLimit) {
+                      ytmTracks = ytmTracks.slice(0, countLimit);
+                    }
 
                     const playlist = isYtmLiked
                       ? {
@@ -6539,9 +6650,7 @@ function App() {
                           ? {
                               id: selectedPlaylistId || "",
                               name: selectedYtmPlaylist?.name || ytmPl?.title || "Playlist de YouTube",
-                              tracks: (selectedYtmPlaylist?.tracks && selectedYtmPlaylist.tracks.length > 0)
-                                ? selectedYtmPlaylist.tracks
-                                : cachedTracks,
+                              tracks: ytmTracks,
                               _coverOverride: selectedYtmPlaylist?.coverImage || ytmPl?.thumbnail || null,
                             }
                           : (playlists.find(p => p.id === selectedPlaylistId) || (capiSmartPl ? {
@@ -6889,7 +6998,7 @@ function App() {
 
                   {/* Playlists sincronizadas de YouTube Music */}
                   {ytmSyncData.playlists && ytmSyncData.playlists.map((p) => {
-                    const cachedCount = getYtmCachedPlaylistTracks(p.id).length;
+                    const cachedCount = getYtmCachedPlaylistTracks(p.id, p.songCount).length;
                     const songCountDisplay = p.songCount || cachedCount || null;
                     return (
                       <div
@@ -6901,7 +7010,7 @@ function App() {
                           openPlaylistContextMenu(e, {
                             id: "ytm-" + p.id,
                             name: p.title,
-                            tracks: getYtmCachedPlaylistTracks(p.id),
+                            tracks: getYtmCachedPlaylistTracks(p.id, p.songCount),
                             _coverOverride: p.thumbnail,
                           });
                         }}
@@ -6938,7 +7047,7 @@ function App() {
                               openPlaylistContextMenu(e, {
                                 id: "ytm-" + p.id,
                                 name: p.title,
-                                tracks: getYtmCachedPlaylistTracks(p.id),
+                                tracks: getYtmCachedPlaylistTracks(p.id, p.songCount),
                                 _coverOverride: p.thumbnail,
                               });
                             }}

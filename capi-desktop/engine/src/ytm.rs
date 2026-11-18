@@ -518,7 +518,7 @@ impl YtmClient {
 
         let body = serde_json::json!({
             "context": context_json,
-            "browseId": "LM"
+            "browseId": "VLLM"
         });
 
         let response = self
@@ -940,27 +940,6 @@ fn parse_duration_str(s: &str) -> Option<u32> {
     }
 }
 
-fn collect_songs_from_browse(val: &Value, songs: &mut Vec<Song>) {
-    if let Value::Object(map) = val {
-        if let Some(renderer) = map.get("musicResponsiveListItemRenderer") {
-            if let Some(song) = parse_song_renderer(renderer) {
-                if !songs.iter().any(|s| s.id == song.id) {
-                    songs.push(song);
-                }
-            }
-            return;
-        }
-
-        for (_, v) in map {
-            collect_songs_from_browse(v, songs);
-        }
-    } else if let Value::Array(arr) = val {
-        for v in arr {
-            collect_songs_from_browse(v, songs);
-        }
-    }
-}
-
 fn extract_playlist_song_count(json: &Value) -> Option<usize> {
     let check_runs = |runs: &Value| -> Option<usize> {
         if let Some(arr) = runs.as_array() {
@@ -981,18 +960,25 @@ fn extract_playlist_song_count(json: &Value) -> Option<usize> {
         None
     };
 
-    if let Some(runs) = json.pointer("/header/musicResponsiveHeaderRenderer/secondSubtitle/runs") {
-        if let Some(c) = check_runs(runs) { return Some(c); }
+    let pointers = [
+        "/header/musicResponsiveHeaderRenderer/secondSubtitle/runs",
+        "/header/musicResponsiveHeaderRenderer/subtitle/runs",
+        "/header/musicEditablePlaylistDetailHeaderRenderer/header/musicResponsiveHeaderRenderer/secondSubtitle/runs",
+        "/header/musicEditablePlaylistDetailHeaderRenderer/header/musicResponsiveHeaderRenderer/subtitle/runs",
+        "/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicResponsiveHeaderRenderer/secondSubtitle/runs",
+        "/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicResponsiveHeaderRenderer/subtitle/runs",
+        "/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicEditablePlaylistDetailHeaderRenderer/header/musicResponsiveHeaderRenderer/secondSubtitle/runs",
+        "/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicEditablePlaylistDetailHeaderRenderer/header/musicResponsiveHeaderRenderer/subtitle/runs",
+    ];
+
+    for ptr in &pointers {
+        if let Some(runs) = json.pointer(ptr) {
+            if let Some(c) = check_runs(runs) {
+                return Some(c);
+            }
+        }
     }
-    if let Some(runs) = json.pointer("/header/musicEditablePlaylistDetailHeaderRenderer/header/musicResponsiveHeaderRenderer/secondSubtitle/runs") {
-        if let Some(c) = check_runs(runs) { return Some(c); }
-    }
-    if let Some(runs) = json.pointer("/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicResponsiveHeaderRenderer/secondSubtitle/runs") {
-        if let Some(c) = check_runs(runs) { return Some(c); }
-    }
-    if let Some(runs) = json.pointer("/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicEditablePlaylistDetailHeaderRenderer/header/musicResponsiveHeaderRenderer/secondSubtitle/runs") {
-        if let Some(c) = check_runs(runs) { return Some(c); }
-    }
+
     None
 }
 
@@ -1399,6 +1385,15 @@ fn collect_artists_from_browse(val: &Value, artists: &mut Vec<YtmArtist>) {
             return;
         }
 
+        if let Some(renderer) = map.get("musicResponsiveListItemRenderer") {
+            if let Some(art) = parse_artist_responsive(renderer) {
+                if !artists.iter().any(|a| a.id == art.id) {
+                    artists.push(art);
+                }
+            }
+            return;
+        }
+
         for (_, v) in map {
             collect_artists_from_browse(v, artists);
         }
@@ -1407,6 +1402,48 @@ fn collect_artists_from_browse(val: &Value, artists: &mut Vec<YtmArtist>) {
             collect_artists_from_browse(v, artists);
         }
     }
+}
+
+fn parse_artist_responsive(r: &Value) -> Option<YtmArtist> {
+    let browse_id = r["navigationEndpoint"]["browseEndpoint"]["browseId"]
+        .as_str()?
+        .to_string();
+
+    let page_type = r["navigationEndpoint"]["browseEndpoint"]["browseEndpointContextSupportedConfigs"]["browseEndpointContextMusicConfig"]["pageType"]
+        .as_str()
+        .unwrap_or("");
+    if !page_type.contains("ARTIST") && !browse_id.starts_with("UC") {
+        return None;
+    }
+
+    let flex = r["flexColumns"].as_array()?;
+    let col0 = flex.first()?;
+    let name = col0["musicResponsiveListItemFlexColumnRenderer"]["text"]["runs"]
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|t| t["text"].as_str())?
+        .to_string();
+
+    let thumbnail = r["thumbnail"]["musicThumbnailRenderer"]["thumbnail"]["thumbnails"]
+        .as_array()
+        .and_then(|arr| arr.last())
+        .and_then(|th| th["url"].as_str())
+        .map(|s| s.to_string());
+
+    let subscribers = flex.get(1).and_then(|col| {
+        col["musicResponsiveListItemFlexColumnRenderer"]["text"]["runs"]
+            .as_array()
+            .and_then(|runs| runs.first())
+            .and_then(|r| r["text"].as_str())
+            .map(|s| s.to_string())
+    });
+
+    Some(YtmArtist {
+        id: browse_id,
+        name,
+        thumbnail,
+        subscribers,
+    })
 }
 
 fn parse_artist_two_row(r: &Value) -> Option<YtmArtist> {
