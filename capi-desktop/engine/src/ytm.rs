@@ -56,6 +56,8 @@ pub struct YtmPlaylist {
     pub thumbnail: Option<String>,
     pub song_count: Option<u32>,
     pub is_editable: bool,
+    #[serde(default)]
+    pub tracks: Vec<Song>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -717,10 +719,25 @@ impl YtmClient {
 
         let mut songs = Vec::new();
         let mut continuation = extract_playlist_shelf_tracks(&json, &mut songs);
+        let expected_count = extract_playlist_song_count(&json);
+
+        // Si ya obtuvimos la cantidad esperada de canciones, terminar de inmediato
+        if let Some(exp) = expected_count {
+            if songs.len() >= exp {
+                songs.truncate(exp);
+                return Ok(songs);
+            }
+        }
 
         // Seguir continuaciones si la playlist tiene más de 100 canciones
         let mut pages = 0;
         while let Some(token) = continuation {
+            if let Some(exp) = expected_count {
+                if songs.len() >= exp {
+                    songs.truncate(exp);
+                    break;
+                }
+            }
             if pages >= 25 {
                 break;
             }
@@ -750,6 +767,12 @@ impl YtmClient {
                 }
             } else {
                 break;
+            }
+        }
+
+        if let Some(exp) = expected_count {
+            if songs.len() > exp {
+                songs.truncate(exp);
             }
         }
 
@@ -795,9 +818,39 @@ impl YtmClient {
     // ─── Sincronización Completa ─────────────────────────────────────
 
     pub async fn full_sync(&self) -> Result<YtmSyncData, EngineError> {
-        let liked_songs = self.fetch_liked_songs().await.unwrap_or_default();
-        let playlists = self.fetch_saved_playlists().await.unwrap_or_default();
-        let artists = self.fetch_subscribed_artists().await.unwrap_or_default();
+        let (liked_songs_res, playlists_res, artists_res) = tokio::join!(
+            self.fetch_liked_songs(),
+            self.fetch_saved_playlists(),
+            self.fetch_subscribed_artists()
+        );
+
+        let liked_songs = liked_songs_res.unwrap_or_default();
+        let mut playlists = playlists_res.unwrap_or_default();
+        let artists = artists_res.unwrap_or_default();
+
+        // Precargar en paralelo las canciones exactas de cada playlist para guardarlas al instante
+        let pl_ids: Vec<String> = playlists.iter().map(|p| p.id.clone()).collect();
+        let mut tracks_map: HashMap<String, Vec<Song>> = HashMap::new();
+
+        for chunk in pl_ids.chunks(4) {
+            let chunk_futs = chunk.iter().map(|id| async {
+                let tracks = self.fetch_playlist_tracks(id).await.unwrap_or_default();
+                (id.clone(), tracks)
+            });
+            let results = futures::future::join_all(chunk_futs).await;
+            for (id, tracks) in results {
+                tracks_map.insert(id, tracks);
+            }
+        }
+
+        for pl in &mut playlists {
+            if let Some(tracks) = tracks_map.remove(&pl.id) {
+                if !tracks.is_empty() {
+                    pl.song_count = Some(tracks.len() as u32);
+                }
+                pl.tracks = tracks;
+            }
+        }
 
         Ok(YtmSyncData {
             liked_songs,
@@ -908,6 +961,41 @@ fn collect_songs_from_browse(val: &Value, songs: &mut Vec<Song>) {
     }
 }
 
+fn extract_playlist_song_count(json: &Value) -> Option<usize> {
+    let check_runs = |runs: &Value| -> Option<usize> {
+        if let Some(arr) = runs.as_array() {
+            for run in arr {
+                if let Some(text) = run.get("text").and_then(|t| t.as_str()) {
+                    let trimmed = text.trim();
+                    for word in trimmed.split_whitespace() {
+                        let clean: String = word.chars().filter(|c| c.is_ascii_digit()).collect();
+                        if let Ok(num) = clean.parse::<usize>() {
+                            if num > 0 {
+                                return Some(num);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
+    };
+
+    if let Some(runs) = json.pointer("/header/musicResponsiveHeaderRenderer/secondSubtitle/runs") {
+        if let Some(c) = check_runs(runs) { return Some(c); }
+    }
+    if let Some(runs) = json.pointer("/header/musicEditablePlaylistDetailHeaderRenderer/header/musicResponsiveHeaderRenderer/secondSubtitle/runs") {
+        if let Some(c) = check_runs(runs) { return Some(c); }
+    }
+    if let Some(runs) = json.pointer("/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicResponsiveHeaderRenderer/secondSubtitle/runs") {
+        if let Some(c) = check_runs(runs) { return Some(c); }
+    }
+    if let Some(runs) = json.pointer("/contents/twoColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents/0/musicEditablePlaylistDetailHeaderRenderer/header/musicResponsiveHeaderRenderer/secondSubtitle/runs") {
+        if let Some(c) = check_runs(runs) { return Some(c); }
+    }
+    None
+}
+
 fn find_first_playlist_shelf(json: &Value) -> Option<&Value> {
     // 1. Camino directo: twoColumnBrowseResultsRenderer -> secondaryContents -> sectionListRenderer -> contents
     if let Some(sec) = json.pointer("/contents/twoColumnBrowseResultsRenderer/secondaryContents/sectionListRenderer/contents") {
@@ -916,8 +1004,15 @@ fn find_first_playlist_shelf(json: &Value) -> Option<&Value> {
                 if let Some(shelf) = item.get("musicPlaylistShelfRenderer") {
                     return Some(shelf);
                 }
-                if let Some(shelf) = item.get("musicShelfRenderer") {
+                if let Some(shelf) = item.pointer("/itemSectionRenderer/contents/0/musicPlaylistShelfRenderer") {
                     return Some(shelf);
+                }
+                if let Some(shelf) = item.get("musicShelfRenderer") {
+                    let title = shelf.pointer("/title/runs/0/text").and_then(|t| t.as_str()).unwrap_or("");
+                    let tl = title.to_lowercase();
+                    if !tl.contains("sugerencia") && !tl.contains("suggestion") && !tl.contains("relacionad") {
+                        return Some(shelf);
+                    }
                 }
             }
         }
@@ -930,16 +1025,22 @@ fn find_first_playlist_shelf(json: &Value) -> Option<&Value> {
                 if let Some(shelf) = item.get("musicPlaylistShelfRenderer") {
                     return Some(shelf);
                 }
-                if let Some(shelf) = item.get("musicShelfRenderer") {
+                if let Some(shelf) = item.pointer("/itemSectionRenderer/contents/0/musicPlaylistShelfRenderer") {
                     return Some(shelf);
+                }
+                if let Some(shelf) = item.get("musicShelfRenderer") {
+                    let title = shelf.pointer("/title/runs/0/text").and_then(|t| t.as_str()).unwrap_or("");
+                    let tl = title.to_lowercase();
+                    if !tl.contains("sugerencia") && !tl.contains("suggestion") && !tl.contains("relacionad") {
+                        return Some(shelf);
+                    }
                 }
             }
         }
     }
 
-    // 3. Fallback: buscar únicamente el primer musicPlaylistShelfRenderer o musicShelfRenderer
+    // 3. Fallback: buscar únicamente el primer musicPlaylistShelfRenderer
     find_shelf_by_name(json, "musicPlaylistShelfRenderer")
-        .or_else(|| find_shelf_by_name(json, "musicShelfRenderer"))
 }
 
 fn find_shelf_by_name<'a>(val: &'a Value, name: &str) -> Option<&'a Value> {
@@ -995,10 +1096,6 @@ fn parse_shelf_contents(shelf: &Value, songs: &mut Vec<Song>) -> Option<String> 
                     next_token = Some(t.to_string());
                     break;
                 }
-                if let Some(t) = cont.pointer("/nextRadioContinuationData/continuation").and_then(|t| t.as_str()) {
-                    next_token = Some(t.to_string());
-                    break;
-                }
             }
         }
     }
@@ -1010,8 +1107,7 @@ fn extract_playlist_shelf_tracks(json: &Value, songs: &mut Vec<Song>) -> Option<
     if let Some(shelf) = find_first_playlist_shelf(json) {
         parse_shelf_contents(shelf, songs)
     } else {
-        collect_songs_from_browse(json, songs);
-        find_continuation_token(json)
+        None
     }
 }
 
@@ -1225,6 +1321,7 @@ fn parse_playlist_two_row(r: &Value) -> Option<YtmPlaylist> {
         thumbnail,
         song_count,
         is_editable: true,
+        tracks: Vec::new(),
     })
 }
 
@@ -1287,6 +1384,7 @@ fn parse_playlist_responsive(r: &Value) -> Option<YtmPlaylist> {
         thumbnail,
         song_count,
         is_editable: true,
+        tracks: Vec::new(),
     })
 }
 

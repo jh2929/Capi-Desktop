@@ -774,7 +774,7 @@ function App() {
   // State for YouTube Music synced data (without downloading audio)
   interface YtmSyncDataState {
     likedSongs: Track[];
-    playlists: Array<{ id: string; title: string; thumbnail?: string; songCount?: number; isEditable?: boolean }>;
+    playlists: Array<{ id: string; title: string; thumbnail?: string; songCount?: number; isEditable?: boolean; tracks?: Track[] }>;
     artists: Array<{ id: string; name: string; thumbnail?: string; subscribers?: string }>;
   }
   const [ytmSyncData, setYtmSyncData] = useState<YtmSyncDataState>(() => {
@@ -886,17 +886,34 @@ function App() {
       const resJson = await invoke<string>("sincronizar_ytm");
       const data = JSON.parse(resJson);
 
+      // Guardar de inmediato en localStorage las canciones exactas de cada playlist sincronizada
+      if (Array.isArray(data.playlists)) {
+        for (const p of data.playlists) {
+          const cleanId = p.id.startsWith("ytm-") ? p.id.slice(4) : p.id;
+          const mapped = (p.tracks || []).map(convertYTItemToTrack);
+          if (mapped.length > 0) {
+            localStorage.setItem("capi_ytm_pl_tracks_" + cleanId, JSON.stringify(mapped));
+          }
+        }
+      }
+
       let totalSyncedPlaylists = 0;
       setYtmSyncData(prev => {
-        const newPlaylists = Array.isArray(data.playlists) ? data.playlists : [];
-        const playlistMap = new Map<string, typeof newPlaylists[0]>();
+        const rawNewPlaylists = Array.isArray(data.playlists) ? data.playlists : [];
+        const playlistMap = new Map<string, typeof rawNewPlaylists[0]>();
+
         // Mantener las playlists sincronizadas previamente de cualquier cuenta
         for (const p of (prev.playlists || [])) {
           playlistMap.set(p.id, p);
         }
-        // Incorporar o actualizar las playlists de la cuenta actual
-        for (const p of newPlaylists) {
-          playlistMap.set(p.id, p);
+        // Incorporar o actualizar las playlists de la cuenta actual con sus pistas exactas
+        for (const p of rawNewPlaylists) {
+          const mapped = (p.tracks || []).map(convertYTItemToTrack);
+          playlistMap.set(p.id, {
+            ...p,
+            tracks: mapped,
+            songCount: mapped.length > 0 ? mapped.length : p.songCount,
+          });
         }
         const mergedPlaylists = Array.from(playlistMap.values());
         totalSyncedPlaylists = mergedPlaylists.length;
@@ -1010,86 +1027,67 @@ function App() {
     return safeJsonParse<Track[]>(localStorage.getItem("capi_ytm_pl_tracks_" + cleanId), []);
   };
 
-  const openYtmPlaylist = useCallback(async (p: { id: string; title: string; thumbnail?: string; songCount?: number }) => {
+  const openYtmPlaylist = useCallback((p: { id: string; title: string; thumbnail?: string; songCount?: number; tracks?: Track[] }) => {
     const cleanId = p.id.startsWith("ytm-") ? p.id.slice(4) : p.id;
     const cacheKey = "capi_ytm_pl_tracks_" + cleanId;
-    const cachedTracks = safeJsonParse<Track[]>(localStorage.getItem(cacheKey), []);
+    const tracksToUse = (p.tracks && p.tracks.length > 0)
+      ? p.tracks
+      : safeJsonParse<Track[]>(localStorage.getItem(cacheKey), []);
 
-    // Si ya teníamos canciones cacheadas, abrirla al instante
-    if (cachedTracks.length > 0) {
-      setSelectedYtmPlaylist({
-        id: "ytm-" + cleanId,
-        name: p.title,
-        tracks: cachedTracks,
-        coverImage: p.thumbnail,
-      });
-      setSelectedPlaylistId("ytm-" + cleanId);
-      navigateTo("playlists");
-    }
+    // Carga 100% instantánea sin spinner ni esperas
+    setSelectedYtmPlaylist({
+      id: "ytm-" + cleanId,
+      name: p.title,
+      tracks: tracksToUse,
+      coverImage: p.thumbnail,
+    });
+    setSelectedPlaylistId("ytm-" + cleanId);
+    navigateTo("playlists");
 
-    try {
-      if (cachedTracks.length === 0) {
-        showToast(`Cargando playlist "${p.title}"...`);
-      }
-      const res = await invoke<string>("obtener_playlist", { id: cleanId });
-      const parsed = JSON.parse(res);
-      const rawTracks = Array.isArray(parsed) ? parsed : (parsed.tracks || []);
-      const mappedTracks = rawTracks.map(convertYTItemToTrack);
-
-      if (mappedTracks.length > 0) {
-        localStorage.setItem(cacheKey, JSON.stringify(mappedTracks));
-        setSelectedYtmPlaylist({
-          id: "ytm-" + cleanId,
-          name: p.title,
-          tracks: mappedTracks,
-          coverImage: p.thumbnail,
-        });
-        setSelectedPlaylistId("ytm-" + cleanId);
-        navigateTo("playlists");
-      } else if (cachedTracks.length === 0) {
-        setSelectedYtmPlaylist({
-          id: "ytm-" + cleanId,
-          name: p.title,
-          tracks: [],
-          coverImage: p.thumbnail,
-        });
-        setSelectedPlaylistId("ytm-" + cleanId);
-        navigateTo("playlists");
-      }
-    } catch (e) {
-      if (cachedTracks.length === 0) {
-        showToast("Error al cargar playlist de YouTube: " + e);
-      }
+    // Si por alguna razón no tiene pistas guardadas, intentar obtenerlas en background sin bloquear
+    if (tracksToUse.length === 0) {
+      invoke<string>("obtener_playlist", { id: cleanId })
+        .then(res => {
+          const parsed = JSON.parse(res);
+          const rawTracks = Array.isArray(parsed) ? parsed : (parsed.tracks || []);
+          const mappedTracks = rawTracks.map(convertYTItemToTrack);
+          if (mappedTracks.length > 0) {
+            localStorage.setItem(cacheKey, JSON.stringify(mappedTracks));
+            setSelectedYtmPlaylist(prev => prev && prev.id === "ytm-" + cleanId ? { ...prev, tracks: mappedTracks } : prev);
+          }
+        })
+        .catch(() => {});
     }
   }, []);
 
-  const playYtmPlaylistDirectly = useCallback(async (p: { id: string; title?: string }) => {
+  const playYtmPlaylistDirectly = useCallback((p: { id: string; title?: string; tracks?: Track[] }) => {
     const cleanId = p.id.startsWith("ytm-") ? p.id.slice(4) : p.id;
     const cacheKey = "capi_ytm_pl_tracks_" + cleanId;
-    let mappedTracks: Track[] = safeJsonParse<Track[]>(localStorage.getItem(cacheKey), []);
+    const tracksToUse = (p.tracks && p.tracks.length > 0)
+      ? p.tracks
+      : safeJsonParse<Track[]>(localStorage.getItem(cacheKey), []);
 
-    if (mappedTracks.length > 0) {
-      playTrack(mappedTracks[0], mappedTracks);
+    if (tracksToUse.length > 0) {
+      playTrack(tracksToUse[0], tracksToUse);
       showToast(`Reproduciendo "${p.title || 'Playlist'}"`);
       return;
     }
 
-    try {
-      showToast(`Cargando "${p.title || 'Playlist'}"...`);
-      const res = await invoke<string>("obtener_playlist", { id: cleanId });
-      const parsed = JSON.parse(res);
-      const rawTracks = Array.isArray(parsed) ? parsed : (parsed.tracks || []);
-      mappedTracks = rawTracks.map(convertYTItemToTrack);
-      if (mappedTracks.length > 0) {
-        localStorage.setItem(cacheKey, JSON.stringify(mappedTracks));
-        playTrack(mappedTracks[0], mappedTracks);
-        showToast(`Reproduciendo "${p.title || 'Playlist'}"`);
-      } else {
-        showToast("La playlist no tiene canciones disponibles.");
-      }
-    } catch (e) {
-      showToast("Error al reproducir playlist: " + e);
-    }
+    showToast(`Cargando "${p.title || 'Playlist'}"...`);
+    invoke<string>("obtener_playlist", { id: cleanId })
+      .then(res => {
+        const parsed = JSON.parse(res);
+        const rawTracks = Array.isArray(parsed) ? parsed : (parsed.tracks || []);
+        const mappedTracks = rawTracks.map(convertYTItemToTrack);
+        if (mappedTracks.length > 0) {
+          localStorage.setItem(cacheKey, JSON.stringify(mappedTracks));
+          playTrack(mappedTracks[0], mappedTracks);
+          showToast(`Reproduciendo "${p.title || 'Playlist'}"`);
+        } else {
+          showToast("La playlist no tiene canciones disponibles.");
+        }
+      })
+      .catch(e => showToast("Error al reproducir playlist: " + e));
   }, []);
 
   useEffect(() => {
@@ -6609,9 +6607,8 @@ function App() {
                           </div>
                           <div className="w-full min-w-0 text-center">
                             {(isYtmLiked || isYtmCustom) && (
-                              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-red-500/15 border border-red-500/30 text-red-400 text-xs font-semibold mb-2 shadow-sm">
-                                <YoutubeIcon className="w-3.5 h-3.5 fill-current" />
-                                <span>Sincronizado con YouTube</span>
+                              <div className="inline-flex items-center justify-center w-7 h-7 rounded-full bg-red-500/15 border border-red-500/30 text-red-500 mb-2 shadow-sm" title="YouTube Music">
+                                <YoutubeIcon className="w-4 h-4 fill-current" />
                               </div>
                             )}
                             <p className="text-xs text-brand-primary uppercase font-bold tracking-wider mb-1">
@@ -6920,10 +6917,9 @@ function App() {
                           )}
                           <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors rounded-xl" />
 
-                          {/* Etiqueta Sincronizado con YouTube */}
-                          <div className="absolute top-2 left-2 flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-black/80 backdrop-blur-md text-red-400 border border-red-500/30 text-[10px] font-bold shadow-md pointer-events-none">
-                            <YoutubeIcon className="w-2.5 h-2.5 fill-current text-red-500" />
-                            <span className="truncate max-w-[120px]">Sincronizado</span>
+                          {/* Etiqueta: solo el logo de YouTube */}
+                          <div className="absolute top-2 left-2 w-6 h-6 rounded-lg bg-black/75 backdrop-blur-md flex items-center justify-center border border-white/10 shadow-md pointer-events-none" title="YouTube Music">
+                            <YoutubeIcon className="w-3.5 h-3.5 text-red-500 fill-current" />
                           </div>
 
                           <button
@@ -6953,13 +6949,9 @@ function App() {
                           </button>
                         </div>
                         <p className="text-xs font-semibold text-text-primary truncate" title={p.title}>{p.title}</p>
-                        <div className="flex items-center gap-1.5 mt-0.5">
-                          <span className="text-[11px] text-text-secondary/70 truncate">
-                            {songCountDisplay ? `${songCountDisplay} canciones` : 'YouTube Music'}
-                          </span>
-                          <span className="w-1 h-1 rounded-full bg-red-500/60 flex-shrink-0" />
-                          <span className="text-[10px] text-red-400 font-medium truncate">YouTube</span>
-                        </div>
+                        <p className="text-[11px] text-text-secondary/70 truncate mt-0.5">
+                          {songCountDisplay ? `${songCountDisplay} canciones` : 'YouTube Music'}
+                        </p>
                       </div>
                     );
                   })}
