@@ -275,6 +275,7 @@ interface Playlist {
   id: string;
   name: string;
   tracks: Track[];
+  _coverOverride?: string | null;
 }
 
 interface LyricLine {
@@ -869,9 +870,7 @@ function App() {
     try {
       await invoke("cerrar_sesion_ytm");
       setYtmAccount({ loggedIn: false });
-      setYtmSyncData({ likedSongs: [], playlists: [], artists: [] });
-      localStorage.removeItem("capi_ytm_sync_data");
-      showToast("Sesión de YouTube Music cerrada.");
+      showToast("Sesión de YouTube Music cerrada. Tus playlists sincronizadas se mantienen guardadas.");
     } catch (e) {
       showToast("Error al cerrar sesión: " + e);
     }
@@ -887,25 +886,51 @@ function App() {
       const resJson = await invoke<string>("sincronizar_ytm");
       const data = JSON.parse(resJson);
 
-      const syncObj: YtmSyncDataState = {
-        likedSongs: Array.isArray(data.likedSongs) ? data.likedSongs : [],
-        playlists: Array.isArray(data.playlists) ? data.playlists : [],
-        artists: Array.isArray(data.artists) ? data.artists : [],
-      };
-      setYtmSyncData(syncObj);
-      localStorage.setItem("capi_ytm_sync_data", JSON.stringify(syncObj));
+      let totalSyncedPlaylists = 0;
+      setYtmSyncData(prev => {
+        const newPlaylists = Array.isArray(data.playlists) ? data.playlists : [];
+        const playlistMap = new Map<string, typeof newPlaylists[0]>();
+        // Mantener las playlists sincronizadas previamente de cualquier cuenta
+        for (const p of (prev.playlists || [])) {
+          playlistMap.set(p.id, p);
+        }
+        // Incorporar o actualizar las playlists de la cuenta actual
+        for (const p of newPlaylists) {
+          playlistMap.set(p.id, p);
+        }
+        const mergedPlaylists = Array.from(playlistMap.values());
+        totalSyncedPlaylists = mergedPlaylists.length;
 
-      if (syncObj.artists.length > 0) {
+        const mergedLikedSongs = Array.isArray(data.likedSongs) && data.likedSongs.length > 0
+          ? data.likedSongs
+          : prev.likedSongs;
+
+        const mergedArtists = Array.isArray(data.artists) && data.artists.length > 0
+          ? data.artists
+          : prev.artists;
+
+        const updated: YtmSyncDataState = {
+          likedSongs: mergedLikedSongs,
+          playlists: mergedPlaylists,
+          artists: mergedArtists,
+        };
+        localStorage.setItem("capi_ytm_sync_data", JSON.stringify(updated));
+        return updated;
+      });
+
+      if (Array.isArray(data.artists) && data.artists.length > 0) {
         setSubscribedArtistIds(prev => {
           const next = new Set(prev);
-          for (const a of syncObj.artists) {
+          for (const a of data.artists) {
             next.add(a.id);
           }
           return next;
         });
       }
 
-      showToast(`YouTube Music sincronizado: ${syncObj.likedSongs.length} favoritas, ${syncObj.playlists.length} playlists, ${syncObj.artists.length} artistas.`);
+      const likedCount = Array.isArray(data.likedSongs) ? data.likedSongs.length : 0;
+      const artCount = Array.isArray(data.artists) ? data.artists.length : 0;
+      showToast(`YouTube Music sincronizado: ${likedCount} favoritas, ${totalSyncedPlaylists} playlists guardadas, ${artCount} artistas.`);
     } catch (err) {
       showToast("Error durante la sincronización: " + err);
     } finally {
@@ -980,33 +1005,83 @@ function App() {
     }
   };
 
+  const getYtmCachedPlaylistTracks = (playlistId: string): Track[] => {
+    const cleanId = playlistId.startsWith("ytm-") ? playlistId.slice(4) : playlistId;
+    return safeJsonParse<Track[]>(localStorage.getItem("capi_ytm_pl_tracks_" + cleanId), []);
+  };
+
   const openYtmPlaylist = useCallback(async (p: { id: string; title: string; thumbnail?: string; songCount?: number }) => {
+    const cleanId = p.id.startsWith("ytm-") ? p.id.slice(4) : p.id;
+    const cacheKey = "capi_ytm_pl_tracks_" + cleanId;
+    const cachedTracks = safeJsonParse<Track[]>(localStorage.getItem(cacheKey), []);
+
+    // Si ya teníamos canciones cacheadas, abrirla al instante
+    if (cachedTracks.length > 0) {
+      setSelectedYtmPlaylist({
+        id: "ytm-" + cleanId,
+        name: p.title,
+        tracks: cachedTracks,
+        coverImage: p.thumbnail,
+      });
+      setSelectedPlaylistId("ytm-" + cleanId);
+      navigateTo("playlists");
+    }
+
     try {
-      showToast(`Cargando playlist "${p.title}"...`);
-      const res = await invoke<string>("obtener_playlist", { id: p.id });
+      if (cachedTracks.length === 0) {
+        showToast(`Cargando playlist "${p.title}"...`);
+      }
+      const res = await invoke<string>("obtener_playlist", { id: cleanId });
       const parsed = JSON.parse(res);
       const rawTracks = Array.isArray(parsed) ? parsed : (parsed.tracks || []);
       const mappedTracks = rawTracks.map(convertYTItemToTrack);
-      setSelectedYtmPlaylist({
-        id: "ytm-" + p.id,
-        name: p.title,
-        tracks: mappedTracks,
-        coverImage: p.thumbnail,
-      });
-      setSelectedPlaylistId("ytm-" + p.id);
-      navigateTo("playlists");
+
+      if (mappedTracks.length > 0) {
+        localStorage.setItem(cacheKey, JSON.stringify(mappedTracks));
+        setSelectedYtmPlaylist({
+          id: "ytm-" + cleanId,
+          name: p.title,
+          tracks: mappedTracks,
+          coverImage: p.thumbnail,
+        });
+        setSelectedPlaylistId("ytm-" + cleanId);
+        navigateTo("playlists");
+      } else if (cachedTracks.length === 0) {
+        setSelectedYtmPlaylist({
+          id: "ytm-" + cleanId,
+          name: p.title,
+          tracks: [],
+          coverImage: p.thumbnail,
+        });
+        setSelectedPlaylistId("ytm-" + cleanId);
+        navigateTo("playlists");
+      }
     } catch (e) {
-      showToast("Error al cargar playlist de YouTube: " + e);
+      if (cachedTracks.length === 0) {
+        showToast("Error al cargar playlist de YouTube: " + e);
+      }
     }
   }, []);
 
   const playYtmPlaylistDirectly = useCallback(async (p: { id: string; title?: string }) => {
+    const cleanId = p.id.startsWith("ytm-") ? p.id.slice(4) : p.id;
+    const cacheKey = "capi_ytm_pl_tracks_" + cleanId;
+    let mappedTracks: Track[] = safeJsonParse<Track[]>(localStorage.getItem(cacheKey), []);
+
+    if (mappedTracks.length > 0) {
+      playTrack(mappedTracks[0], mappedTracks);
+      showToast(`Reproduciendo "${p.title || 'Playlist'}"`);
+      return;
+    }
+
     try {
-      const res = await invoke<string>("obtener_playlist", { id: p.id });
+      showToast(`Cargando "${p.title || 'Playlist'}"...`);
+      const res = await invoke<string>("obtener_playlist", { id: cleanId });
       const parsed = JSON.parse(res);
       const rawTracks = Array.isArray(parsed) ? parsed : (parsed.tracks || []);
-      const mappedTracks = rawTracks.map(convertYTItemToTrack);
+      mappedTracks = rawTracks.map(convertYTItemToTrack);
       if (mappedTracks.length > 0) {
+        localStorage.setItem(cacheKey, JSON.stringify(mappedTracks));
         playTrack(mappedTracks[0], mappedTracks);
         showToast(`Reproduciendo "${p.title || 'Playlist'}"`);
       } else {
@@ -3393,6 +3468,19 @@ function App() {
   };
 
   const deletePlaylist = (id: string) => {
+    if (id.startsWith("ytm-")) {
+      const rawId = id.slice(4);
+      setYtmSyncData(prev => {
+        const nextPl = prev.playlists.filter(p => p.id !== rawId);
+        const updated = { ...prev, playlists: nextPl };
+        localStorage.setItem("capi_ytm_sync_data", JSON.stringify(updated));
+        return updated;
+      });
+      localStorage.removeItem("capi_ytm_pl_tracks_" + rawId);
+      if (selectedPlaylistId === id) setSelectedPlaylistId(null);
+      showToast("Playlist de YouTube eliminada de tu biblioteca.");
+      return;
+    }
     setPlaylists(prev => prev.filter(p => p.id !== id));
     if (selectedPlaylistId === id) setSelectedPlaylistId(null);
   };
@@ -3438,6 +3526,10 @@ function App() {
     if (activeTab === "playlists") {
       if (selectedPlaylistId === "ytm-liked-songs") return ytmSyncData.likedSongs || [];
       if (selectedYtmPlaylist && selectedPlaylistId === selectedYtmPlaylist.id) return selectedYtmPlaylist.tracks || [];
+      if (selectedPlaylistId?.startsWith("ytm-")) {
+        const cached = getYtmCachedPlaylistTracks(selectedPlaylistId);
+        if (cached.length > 0) return cached;
+      }
       return playlists.find(p => p.id === selectedPlaylistId)?.tracks || capiPlaylists.find(p => p.id === selectedPlaylistId)?.tracks || [];
     }
     if (activeTab === "biblioteca") {
@@ -6429,9 +6521,14 @@ function App() {
                 <div className="flex flex-col lg:flex-row gap-8 items-start animate-fade-in">
                   {(() => {
                     const isYtmLiked = selectedPlaylistId === "ytm-liked-songs";
-                    const isYtmCustom = Boolean(selectedYtmPlaylist && selectedPlaylistId === selectedYtmPlaylist.id);
+                    const isYtmCustom = Boolean(
+                      (selectedYtmPlaylist && selectedPlaylistId === selectedYtmPlaylist.id) ||
+                      (selectedPlaylistId?.startsWith("ytm-") && selectedPlaylistId !== "ytm-liked-songs")
+                    );
                     const isCapiSmart = capiPlaylists.some(p => p.id === selectedPlaylistId);
                     const capiSmartPl = capiPlaylists.find(p => p.id === selectedPlaylistId);
+                    const ytmPl = ytmSyncData.playlists?.find(p => "ytm-" + p.id === selectedPlaylistId);
+                    const cachedTracks = selectedPlaylistId ? getYtmCachedPlaylistTracks(selectedPlaylistId) : [];
 
                     const playlist = isYtmLiked
                       ? {
@@ -6440,12 +6537,14 @@ function App() {
                           tracks: ytmSyncData.likedSongs || [],
                           _coverOverride: null,
                         }
-                      : (isYtmCustom && selectedYtmPlaylist
+                      : (isYtmCustom
                           ? {
-                              id: selectedYtmPlaylist.id,
-                              name: selectedYtmPlaylist.name,
-                              tracks: selectedYtmPlaylist.tracks || [],
-                              _coverOverride: selectedYtmPlaylist.coverImage || null,
+                              id: selectedPlaylistId || "",
+                              name: selectedYtmPlaylist?.name || ytmPl?.title || "Playlist de YouTube",
+                              tracks: (selectedYtmPlaylist?.tracks && selectedYtmPlaylist.tracks.length > 0)
+                                ? selectedYtmPlaylist.tracks
+                                : cachedTracks,
+                              _coverOverride: selectedYtmPlaylist?.coverImage || ytmPl?.thumbnail || null,
                             }
                           : (playlists.find(p => p.id === selectedPlaylistId) || (capiSmartPl ? {
                               id: capiSmartPl.id,
@@ -6509,6 +6608,12 @@ function App() {
                             )}
                           </div>
                           <div className="w-full min-w-0 text-center">
+                            {(isYtmLiked || isYtmCustom) && (
+                              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-red-500/15 border border-red-500/30 text-red-400 text-xs font-semibold mb-2 shadow-sm">
+                                <YoutubeIcon className="w-3.5 h-3.5 fill-current" />
+                                <span>Sincronizado con YouTube</span>
+                              </div>
+                            )}
                             <p className="text-xs text-brand-primary uppercase font-bold tracking-wider mb-1">
                               {isYtmLiked || isYtmCustom ? "YouTube Music" : (isCapiSmart ? "Recomendación Capi" : "Lista Personal")}
                             </p>
@@ -6771,7 +6876,7 @@ function App() {
                           }}
                           className="absolute bottom-2 right-2 w-10 h-10 rounded-full bg-brand-primary text-bg-dark shadow-lg flex items-center justify-center opacity-0 group-hover:opacity-100 translate-y-2 group-hover:translate-y-0 transition-all duration-200 hover:scale-105"
                         >
-                          <Play className="w-5 h-5 ml-0.5" />
+                          <Play className="w-5 h-5 ml-0.5 fill-current" />
                         </button>
                         <button
                           onClick={(e) => { e.stopPropagation(); openPlaylistContextMenu(e, playlist); }}
@@ -6784,6 +6889,80 @@ function App() {
                       <p className="text-[11px] text-text-secondary/70 truncate">{playlist.tracks.length} canciones</p>
                     </div>
                   ))}
+
+                  {/* Playlists sincronizadas de YouTube Music */}
+                  {ytmSyncData.playlists && ytmSyncData.playlists.map((p) => {
+                    const cachedCount = getYtmCachedPlaylistTracks(p.id).length;
+                    const songCountDisplay = p.songCount || cachedCount || null;
+                    return (
+                      <div
+                        key={"ytm-" + p.id}
+                        onClick={() => openYtmPlaylist(p)}
+                        onContextMenu={(e) => {
+                          e.preventDefault();
+                          e.stopPropagation();
+                          openPlaylistContextMenu(e, {
+                            id: "ytm-" + p.id,
+                            name: p.title,
+                            tracks: getYtmCachedPlaylistTracks(p.id),
+                            _coverOverride: p.thumbnail,
+                          });
+                        }}
+                        className="flex flex-col group cursor-pointer"
+                      >
+                        <div className="relative w-full aspect-square rounded-xl overflow-hidden bg-surface-dark/40 mb-2 group">
+                          {p.thumbnail ? (
+                            <SafeImage src={p.thumbnail} alt={p.title} className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center">
+                              <Music className="w-8 h-8 text-text-secondary/40" />
+                            </div>
+                          )}
+                          <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors rounded-xl" />
+
+                          {/* Etiqueta Sincronizado con YouTube */}
+                          <div className="absolute top-2 left-2 flex items-center gap-1 px-1.5 py-0.5 rounded-md bg-black/80 backdrop-blur-md text-red-400 border border-red-500/30 text-[10px] font-bold shadow-md pointer-events-none">
+                            <YoutubeIcon className="w-2.5 h-2.5 fill-current text-red-500" />
+                            <span className="truncate max-w-[120px]">Sincronizado</span>
+                          </div>
+
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              playYtmPlaylistDirectly(p);
+                            }}
+                            className="absolute bottom-2 right-2 w-10 h-10 rounded-full bg-brand-primary text-bg-dark shadow-lg flex items-center justify-center opacity-0 group-hover:opacity-100 translate-y-2 group-hover:translate-y-0 transition-all duration-200 hover:scale-105"
+                            title="Reproducir"
+                          >
+                            <Play className="w-5 h-5 ml-0.5 fill-current" />
+                          </button>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              openPlaylistContextMenu(e, {
+                                id: "ytm-" + p.id,
+                                name: p.title,
+                                tracks: getYtmCachedPlaylistTracks(p.id),
+                                _coverOverride: p.thumbnail,
+                              });
+                            }}
+                            className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/50 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-200"
+                            title="Más opciones"
+                          >
+                            <MoreVertical className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        <p className="text-xs font-semibold text-text-primary truncate" title={p.title}>{p.title}</p>
+                        <div className="flex items-center gap-1.5 mt-0.5">
+                          <span className="text-[11px] text-text-secondary/70 truncate">
+                            {songCountDisplay ? `${songCountDisplay} canciones` : 'YouTube Music'}
+                          </span>
+                          <span className="w-1 h-1 rounded-full bg-red-500/60 flex-shrink-0" />
+                          <span className="text-[10px] text-red-400 font-medium truncate">YouTube</span>
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>

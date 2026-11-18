@@ -536,13 +536,12 @@ impl YtmClient {
             .map_err(|e| EngineError::Network(e.to_string()))?;
 
         let mut songs = Vec::new();
-        collect_songs_from_browse(&json, &mut songs);
+        let mut continuation = extract_playlist_shelf_tracks(&json, &mut songs);
 
-        // Continuación para páginas adicionales de favoritos (hasta 15 páginas)
-        let mut continuation = find_continuation_token(&json);
+        // Continuación para páginas adicionales de favoritos (hasta 25 páginas)
         let mut pages = 0;
         while let Some(token) = continuation {
-            if pages >= 15 {
+            if pages >= 25 {
                 break;
             }
             pages += 1;
@@ -562,9 +561,8 @@ impl YtmClient {
             {
                 if let Ok(cont_json) = cont_resp.json::<Value>().await {
                     let prev_count = songs.len();
-                    collect_songs_from_browse(&cont_json, &mut songs);
-                    continuation = find_continuation_token(&cont_json);
-                    if songs.len() == prev_count {
+                    continuation = extract_playlist_continuation_tracks(&cont_json, &mut songs);
+                    if songs.len() == prev_count && continuation.is_none() {
                         break;
                     }
                 } else {
@@ -718,10 +716,9 @@ impl YtmClient {
             .map_err(|e| EngineError::Network(e.to_string()))?;
 
         let mut songs = Vec::new();
-        collect_songs_from_browse(&json, &mut songs);
+        let mut continuation = extract_playlist_shelf_tracks(&json, &mut songs);
 
         // Seguir continuaciones si la playlist tiene más de 100 canciones
-        let mut continuation = find_continuation_token(&json);
         let mut pages = 0;
         while let Some(token) = continuation {
             if pages >= 25 {
@@ -744,9 +741,8 @@ impl YtmClient {
             {
                 if let Ok(cont_json) = cont_resp.json::<Value>().await {
                     let prev_count = songs.len();
-                    collect_songs_from_browse(&cont_json, &mut songs);
-                    continuation = find_continuation_token(&cont_json);
-                    if songs.len() == prev_count {
+                    continuation = extract_playlist_continuation_tracks(&cont_json, &mut songs);
+                    if songs.len() == prev_count && continuation.is_none() {
                         break;
                     }
                 } else {
@@ -912,6 +908,167 @@ fn collect_songs_from_browse(val: &Value, songs: &mut Vec<Song>) {
     }
 }
 
+fn find_first_playlist_shelf(json: &Value) -> Option<&Value> {
+    // 1. Camino directo: twoColumnBrowseResultsRenderer -> secondaryContents -> sectionListRenderer -> contents
+    if let Some(sec) = json.pointer("/contents/twoColumnBrowseResultsRenderer/secondaryContents/sectionListRenderer/contents") {
+        if let Some(arr) = sec.as_array() {
+            for item in arr {
+                if let Some(shelf) = item.get("musicPlaylistShelfRenderer") {
+                    return Some(shelf);
+                }
+                if let Some(shelf) = item.get("musicShelfRenderer") {
+                    return Some(shelf);
+                }
+            }
+        }
+    }
+
+    // 2. Camino directo: singleColumnBrowseResultsRenderer -> tabs[0] -> tabRenderer -> content -> sectionListRenderer -> contents
+    if let Some(sec) = json.pointer("/contents/singleColumnBrowseResultsRenderer/tabs/0/tabRenderer/content/sectionListRenderer/contents") {
+        if let Some(arr) = sec.as_array() {
+            for item in arr {
+                if let Some(shelf) = item.get("musicPlaylistShelfRenderer") {
+                    return Some(shelf);
+                }
+                if let Some(shelf) = item.get("musicShelfRenderer") {
+                    return Some(shelf);
+                }
+            }
+        }
+    }
+
+    // 3. Fallback: buscar únicamente el primer musicPlaylistShelfRenderer o musicShelfRenderer
+    find_shelf_by_name(json, "musicPlaylistShelfRenderer")
+        .or_else(|| find_shelf_by_name(json, "musicShelfRenderer"))
+}
+
+fn find_shelf_by_name<'a>(val: &'a Value, name: &str) -> Option<&'a Value> {
+    if let Value::Object(map) = val {
+        if let Some(shelf) = map.get(name) {
+            return Some(shelf);
+        }
+        for (_, v) in map {
+            if let Some(shelf) = find_shelf_by_name(v, name) {
+                return Some(shelf);
+            }
+        }
+    } else if let Value::Array(arr) = val {
+        for v in arr {
+            if let Some(shelf) = find_shelf_by_name(v, name) {
+                return Some(shelf);
+            }
+        }
+    }
+    None
+}
+
+fn parse_shelf_contents(shelf: &Value, songs: &mut Vec<Song>) -> Option<String> {
+    let mut next_token = None;
+    if let Some(contents) = shelf.get("contents").and_then(|c| c.as_array()) {
+        for item in contents {
+            if let Some(renderer) = item.get("musicResponsiveListItemRenderer") {
+                if let Some(song) = parse_song_renderer(renderer) {
+                    if !songs.iter().any(|s| s.id == song.id) {
+                        songs.push(song);
+                    }
+                }
+            } else if let Some(cont_item) = item.get("continuationItemRenderer") {
+                if let Some(token) = cont_item
+                    .pointer("/continuationEndpoint/continuationCommand/token")
+                    .and_then(|t| t.as_str())
+                {
+                    next_token = Some(token.to_string());
+                } else if let Some(token) = cont_item
+                    .pointer("/continuationEndpoint/nextContinuationData/continuation")
+                    .and_then(|t| t.as_str())
+                {
+                    next_token = Some(token.to_string());
+                }
+            }
+        }
+    }
+
+    if next_token.is_none() {
+        if let Some(conts) = shelf.get("continuations").and_then(|c| c.as_array()) {
+            for cont in conts {
+                if let Some(t) = cont.pointer("/nextContinuationData/continuation").and_then(|t| t.as_str()) {
+                    next_token = Some(t.to_string());
+                    break;
+                }
+                if let Some(t) = cont.pointer("/nextRadioContinuationData/continuation").and_then(|t| t.as_str()) {
+                    next_token = Some(t.to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    next_token
+}
+
+fn extract_playlist_shelf_tracks(json: &Value, songs: &mut Vec<Song>) -> Option<String> {
+    if let Some(shelf) = find_first_playlist_shelf(json) {
+        parse_shelf_contents(shelf, songs)
+    } else {
+        collect_songs_from_browse(json, songs);
+        find_continuation_token(json)
+    }
+}
+
+fn extract_playlist_continuation_tracks(cont_json: &Value, songs: &mut Vec<Song>) -> Option<String> {
+    // 1. continuationContents.musicPlaylistShelfContinuation
+    if let Some(pl_cont) = cont_json.pointer("/continuationContents/musicPlaylistShelfContinuation") {
+        return parse_shelf_contents(pl_cont, songs);
+    }
+
+    // 2. continuationContents.musicShelfContinuation
+    if let Some(shelf_cont) = cont_json.pointer("/continuationContents/musicShelfContinuation") {
+        return parse_shelf_contents(shelf_cont, songs);
+    }
+
+    // 3. onResponseReceivedActions -> appendContinuationItemsAction
+    if let Some(actions) = cont_json.get("onResponseReceivedActions").and_then(|a| a.as_array()) {
+        for action in actions {
+            if let Some(items) = action.pointer("/appendContinuationItemsAction/continuationItems").and_then(|i| i.as_array()) {
+                let mut next_token = None;
+                for item in items {
+                    if let Some(renderer) = item.get("musicResponsiveListItemRenderer") {
+                        if let Some(song) = parse_song_renderer(renderer) {
+                            if !songs.iter().any(|s| s.id == song.id) {
+                                songs.push(song);
+                            }
+                        }
+                    } else if let Some(cont_item) = item.get("continuationItemRenderer") {
+                        if let Some(token) = cont_item
+                            .pointer("/continuationEndpoint/continuationCommand/token")
+                            .and_then(|t| t.as_str())
+                        {
+                            next_token = Some(token.to_string());
+                        } else if let Some(token) = cont_item
+                            .pointer("/continuationEndpoint/nextContinuationData/continuation")
+                            .and_then(|t| t.as_str())
+                        {
+                            next_token = Some(token.to_string());
+                        }
+                    }
+                }
+                return next_token;
+            }
+        }
+    }
+
+    // 4. continuationContents.sectionListContinuation
+    if let Some(sec_contents) = cont_json.pointer("/continuationContents/sectionListContinuation/contents").and_then(|c| c.as_array()) {
+        for sec in sec_contents {
+            if let Some(shelf) = sec.get("musicPlaylistShelfRenderer").or_else(|| sec.get("musicShelfRenderer")) {
+                return parse_shelf_contents(shelf, songs);
+            }
+        }
+    }
+
+    None
+}
+
 fn parse_song_renderer(r: &Value) -> Option<Song> {
     let id = r["playlistItemData"]["videoId"]
         .as_str()
@@ -919,6 +1076,10 @@ fn parse_song_renderer(r: &Value) -> Option<Song> {
             r["overlay"]["musicItemThumbnailOverlayRenderer"]["content"]["musicPlayButtonRenderer"]
                 ["playNavigationEndpoint"]["watchEndpoint"]["videoId"]
                 .as_str()
+        })
+        .or_else(|| {
+            r.pointer("/flexColumns/0/musicResponsiveListItemFlexColumnRenderer/text/runs/0/navigationEndpoint/watchEndpoint/videoId")
+                .and_then(|v| v.as_str())
         })?
         .to_string();
 
