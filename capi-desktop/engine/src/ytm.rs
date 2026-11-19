@@ -340,6 +340,55 @@ impl YtmClient {
 
     // ─── Suscribirse / Desuscribirse a Canal ─────────────────────────
 
+    pub async fn resolve_channel_id(&self, browse_id: &str) -> Result<String, EngineError> {
+        if browse_id.starts_with("UC") {
+            return Ok(browse_id.to_string());
+        }
+
+        let session = self.session.read().await;
+        let body = serde_json::json!({
+            "context": self.build_context_json(&session),
+            "browseId": browse_id
+        });
+        let headers = self.build_headers(&session);
+        drop(session);
+
+        let response = self
+            .http
+            .post("https://music.youtube.com/youtubei/v1/browse")
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EngineError::Network(format!("Error al consultar artista: {e}")))?;
+
+        let json: Value = response
+            .json()
+            .await
+            .map_err(|e| EngineError::Network(e.to_string()))?;
+
+        if let Some(cid) = json["header"]["musicImmersiveHeaderRenderer"]["subscriptionButton"]["subscribeButtonRenderer"]["channelId"].as_str() {
+            if cid.starts_with("UC") {
+                return Ok(cid.to_string());
+            }
+        }
+        if let Some(cid) = json["header"]["musicVisualHeaderRenderer"]["subscriptionButton"]["subscribeButtonRenderer"]["channelId"].as_str() {
+            if cid.starts_with("UC") {
+                return Ok(cid.to_string());
+            }
+        }
+
+        let json_str = json.to_string();
+        if let Some(pos) = json_str.find("\"channelId\":\"UC") {
+            let start = pos + 13;
+            if let Some(end) = json_str[start..].find('"') {
+                return Ok(json_str[start..start + end].to_string());
+            }
+        }
+
+        Ok(browse_id.to_string())
+    }
+
     pub async fn subscribe_channel(
         &self,
         channel_id: &str,
@@ -358,11 +407,18 @@ impl YtmClient {
             ));
         }
 
+        let clean_id = if channel_id.starts_with("UC") {
+            channel_id.to_string()
+        } else {
+            self.resolve_channel_id(channel_id).await.unwrap_or_else(|_| channel_id.to_string())
+        };
+
         let body = serde_json::json!({
             "context": self.build_context_json(&session),
-            "channelIds": [channel_id]
+            "channelIds": [clean_id]
         });
         let headers = self.build_headers(&session);
+        drop(session);
 
         let response = self
             .http
@@ -372,6 +428,121 @@ impl YtmClient {
             .send()
             .await
             .map_err(|e| EngineError::Network(format!("Error al suscribirse: {e}")))?;
+
+        Ok(response.status().is_success())
+    }
+
+    // ─── Crear, Eliminar y Editar Playlists en YouTube Music ──────────
+
+    pub async fn create_playlist(&self, title: &str) -> Result<String, EngineError> {
+        let endpoint = "https://music.youtube.com/youtubei/v1/playlist/create";
+        let session = self.session.read().await;
+        if extract_sapisid(&session.cookie).is_none() {
+            return Err(EngineError::Unavailable(
+                "Inicia sesión con YouTube Music para crear playlists sincronizadas.".into(),
+            ));
+        }
+
+        let body = serde_json::json!({
+            "context": self.build_context_json(&session),
+            "title": title,
+            "privacyStatus": "PRIVATE"
+        });
+        let headers = self.build_headers(&session);
+        drop(session);
+
+        let response = self
+            .http
+            .post(endpoint)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EngineError::Network(format!("Error al crear playlist en YouTube: {e}")))?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let err_txt = response.text().await.unwrap_or_default();
+            return Err(EngineError::Network(format!(
+                "YouTube rechazó la creación de la playlist ({status}): {err_txt}"
+            )));
+        }
+
+        let json: Value = response
+            .json()
+            .await
+            .map_err(|e| EngineError::Network(format!("Respuesta inválida de YouTube: {e}")))?;
+
+        let playlist_id = json["playlistId"]
+            .as_str()
+            .or_else(|| json["id"].as_str())
+            .ok_or_else(|| {
+                EngineError::Network("No se encontró el identificador de la playlist creada".into())
+            })?;
+
+        Ok(playlist_id.to_string())
+    }
+
+    pub async fn delete_playlist(&self, playlist_id: &str) -> Result<bool, EngineError> {
+        let endpoint = "https://music.youtube.com/youtubei/v1/playlist/delete";
+        let session = self.session.read().await;
+        if extract_sapisid(&session.cookie).is_none() {
+            return Err(EngineError::Unavailable(
+                "Inicia sesión con YouTube Music para eliminar playlists.".into(),
+            ));
+        }
+
+        let clean_id = strip_vl(playlist_id);
+        let body = serde_json::json!({
+            "context": self.build_context_json(&session),
+            "playlistId": clean_id
+        });
+        let headers = self.build_headers(&session);
+        drop(session);
+
+        let response = self
+            .http
+            .post(endpoint)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EngineError::Network(format!("Error al eliminar playlist: {e}")))?;
+
+        Ok(response.status().is_success())
+    }
+
+    pub async fn add_to_playlist(&self, playlist_id: &str, video_id: &str) -> Result<bool, EngineError> {
+        let endpoint = "https://music.youtube.com/youtubei/v1/browse/edit_playlist";
+        let session = self.session.read().await;
+        if extract_sapisid(&session.cookie).is_none() {
+            return Err(EngineError::Unavailable(
+                "Inicia sesión con YouTube Music para agregar canciones a la playlist.".into(),
+            ));
+        }
+
+        let clean_id = strip_vl(playlist_id);
+        let body = serde_json::json!({
+            "context": self.build_context_json(&session),
+            "playlistId": clean_id,
+            "actions": [
+                {
+                    "addedVideoId": video_id,
+                    "action": "ACTION_ADD_VIDEO"
+                }
+            ]
+        });
+        let headers = self.build_headers(&session);
+        drop(session);
+
+        let response = self
+            .http
+            .post(endpoint)
+            .headers(headers)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| EngineError::Network(format!("Error al agregar canción a playlist: {e}")))?;
 
         Ok(response.status().is_success())
     }

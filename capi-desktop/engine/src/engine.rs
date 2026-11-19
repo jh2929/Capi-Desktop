@@ -101,6 +101,18 @@ impl Engine {
         self.ytm.subscribe_channel(channel_id, subscribe).await
     }
 
+    pub async fn create_ytm_playlist(&self, title: &str) -> Result<String, EngineError> {
+        self.ytm.create_playlist(title).await
+    }
+
+    pub async fn delete_ytm_playlist(&self, playlist_id: &str) -> Result<bool, EngineError> {
+        self.ytm.delete_playlist(playlist_id).await
+    }
+
+    pub async fn add_to_ytm_playlist(&self, playlist_id: &str, video_id: &str) -> Result<bool, EngineError> {
+        self.ytm.add_to_playlist(playlist_id, video_id).await
+    }
+
     pub async fn like_video(&self, video_id: &str, like: bool) -> Result<bool, EngineError> {
         self.ytm.like_video(video_id, like).await
     }

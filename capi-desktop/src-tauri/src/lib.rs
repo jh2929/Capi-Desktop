@@ -2960,6 +2960,40 @@ async fn suscribirse_canal(
 }
 
 #[tauri::command]
+async fn crear_playlist_ytm(
+    engine: tauri::State<'_, Arc<Engine>>,
+    title: String,
+) -> Result<String, String> {
+    engine
+        .create_ytm_playlist(&title)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn eliminar_playlist_ytm(
+    engine: tauri::State<'_, Arc<Engine>>,
+    playlist_id: String,
+) -> Result<bool, String> {
+    engine
+        .delete_ytm_playlist(&playlist_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn agregar_cancion_playlist_ytm(
+    engine: tauri::State<'_, Arc<Engine>>,
+    playlist_id: String,
+    video_id: String,
+) -> Result<bool, String> {
+    engine
+        .add_to_ytm_playlist(&playlist_id, &video_id)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn like_cancion_ytm(
     engine: tauri::State<'_, Arc<Engine>>,
     video_id: String,
@@ -3466,6 +3500,9 @@ pub fn run() {
             consolidar_carpetas_descargas,
             obtener_reproducciones,
             suscribirse_canal,
+            crear_playlist_ytm,
+            eliminar_playlist_ytm,
+            agregar_cancion_playlist_ytm,
             like_cancion_ytm,
             obtener_estado_sesion_ytm,
             guardar_sesion_ytm,

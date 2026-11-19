@@ -771,6 +771,12 @@ function App() {
     return new Set(safeJsonParse<string[]>(saved, []));
   });
 
+  // Selección masiva y descarga/eliminación de playlists
+  const [showPlaylistSelectionMode, setShowPlaylistSelectionMode] = useState(false);
+  const [selectedPlaylistIds, setSelectedPlaylistIds] = useState<Set<string>>(new Set());
+  const [isBatchPlaylistDownloading, setIsBatchPlaylistDownloading] = useState(false);
+  const [syncNewPlaylistWithYtm, setSyncNewPlaylistWithYtm] = useState(false);
+
   // State for YouTube Music synced data (without downloading audio)
   interface YtmSyncDataState {
     likedSongs: Track[];
@@ -864,6 +870,14 @@ function App() {
       });
       const state = JSON.parse(res);
       setYtmAccount(state);
+      if (state.photo) {
+        setCapiAvatar(state.photo);
+        localStorage.setItem("capi_user_avatar", state.photo);
+      }
+      if (state.name && !localStorage.getItem("capi_username")) {
+        setCapiUsername(state.name);
+        localStorage.setItem("capi_username", state.name);
+      }
       setYtmCookieInput("");
       if (state.loggedIn) {
         showToast("¡Sesión iniciada con éxito en YouTube Music!");
@@ -1028,7 +1042,27 @@ function App() {
           else next.delete(targetId);
           return next;
         });
-        showToast(shouldSubscribe ? `¡Te has suscrito a ${artistData.name}!` : `Anulaste la suscripción a ${artistData.name}`);
+
+        // Actualizar lista de artistas suscritos en memoria y localStorage
+        setYtmSyncData(prev => {
+          let updatedArtists = prev.artists ? [...prev.artists] : [];
+          if (shouldSubscribe) {
+            if (!updatedArtists.some(a => a.id === targetId || (a.name && artistData.name && a.name.toLowerCase() === artistData.name.toLowerCase()))) {
+              updatedArtists.push({
+                id: targetId,
+                name: artistData.name || "Artista",
+                thumbnail: artistData.thumbnail || undefined
+              });
+            }
+          } else {
+            updatedArtists = updatedArtists.filter(a => a.id !== targetId && (!a.name || !artistData.name || a.name.toLowerCase() !== artistData.name.toLowerCase()));
+          }
+          const updated = { ...prev, artists: updatedArtists };
+          localStorage.setItem("capi_ytm_sync_data", JSON.stringify(updated));
+          return updated;
+        });
+
+        showToast(shouldSubscribe ? `¡Te has suscrito a ${artistData.name} en YouTube!` : `Anulaste la suscripción a ${artistData.name}`);
       } else {
         showToast("No se pudo actualizar la suscripción.");
       }
@@ -1156,6 +1190,14 @@ function App() {
       .then(json => {
         const state = JSON.parse(json);
         setYtmAccount(state);
+        if (state.photo) {
+          setCapiAvatar(state.photo);
+          localStorage.setItem("capi_user_avatar", state.photo);
+        }
+        if (state.name && !localStorage.getItem("capi_username")) {
+          setCapiUsername(state.name);
+          localStorage.setItem("capi_username", state.name);
+        }
         if (state.loggedIn) {
           handleSyncYtm();
         }
@@ -1199,7 +1241,18 @@ function App() {
           showToast(`¡Conectado a YouTube Music con éxito! (${userLabel})`);
           setShowYtmModal(false);
           invoke<string>("obtener_estado_sesion_ytm")
-            .then(json => setYtmAccount(JSON.parse(json)))
+            .then(json => {
+              const state = JSON.parse(json);
+              setYtmAccount(state);
+              if (state.photo) {
+                setCapiAvatar(state.photo);
+                localStorage.setItem("capi_user_avatar", state.photo);
+              }
+              if (state.name && !localStorage.getItem("capi_username")) {
+                setCapiUsername(state.name);
+                localStorage.setItem("capi_username", state.name);
+              }
+            })
             .catch(() => {});
           handleSyncYtm();
         } else if (!cancelled && message) {
@@ -1263,10 +1316,12 @@ function App() {
     if (banner) {
       banner.style.transform = "translateY(0px)";
     }
-    if (artistData?.id) {
-      setIsArtistSubscribed(subscribedArtistIds.has(artistData.id));
+    if (artistData) {
+      const isSub = (artistData.id && subscribedArtistIds.has(artistData.id)) ||
+        (ytmSyncData.artists?.some(a => (artistData.id && a.id === artistData.id) || (a.name && artistData.name && a.name.toLowerCase() === artistData.name.toLowerCase())) ?? false);
+      setIsArtistSubscribed(isSub);
     }
-  }, [artistData?.id, subscribedArtistIds]);
+  }, [artistData?.id, artistData?.name, subscribedArtistIds, ytmSyncData.artists]);
 
   // Live lyrics state
   const [lyricsText, setLyricsText] = useState<string>("");
@@ -3549,16 +3604,53 @@ function App() {
     }
   };
 
-  const createPlaylist = () => {
+  const createPlaylist = async () => {
     if (!newPlaylistName.trim()) return;
-    const newPl: Playlist = { id: Math.random().toString(36).substring(2, 9), name: newPlaylistName.trim(), tracks: [] };
+    const name = newPlaylistName.trim();
+    let ytmId: string | null = null;
+
+    if (syncNewPlaylistWithYtm && ytmAccount.loggedIn) {
+      try {
+        showToast("Creando lista en YouTube Music...");
+        ytmId = await invoke<string>("crear_playlist_ytm", { title: name });
+        if (ytmId) {
+          const newYtmPl = {
+            id: ytmId,
+            title: name,
+            thumbnail: undefined,
+            songCount: 0,
+            isEditable: true,
+            tracks: []
+          };
+          setYtmSyncData(prev => {
+            const nextPl = [newYtmPl, ...(prev.playlists || [])];
+            const updated = { ...prev, playlists: nextPl };
+            localStorage.setItem("capi_ytm_sync_data", JSON.stringify(updated));
+            return updated;
+          });
+          localStorage.setItem("capi_ytm_pl_v2_" + ytmId, JSON.stringify([]));
+        }
+      } catch (e) {
+        showToast("Error al crear en YouTube Music: " + e);
+      }
+    }
+
+    const localId = ytmId ? "ytm-" + ytmId : Math.random().toString(36).substring(2, 9);
+    const newPl: Playlist = {
+      id: localId,
+      name,
+      tracks: []
+    };
     setPlaylists(prev => [...prev, newPl]);
     setNewPlaylistName("");
+    setSyncNewPlaylistWithYtm(false);
+    showToast(ytmId ? "¡Lista creada y sincronizada con YouTube Music!" : "Lista de reproducción creada.");
   };
 
   const deletePlaylist = (id: string) => {
     if (id.startsWith("ytm-")) {
       const rawId = id.slice(4);
+      invoke("eliminar_playlist_ytm", { playlistId: rawId }).catch(() => {});
       setYtmSyncData(prev => {
         const nextPl = prev.playlists.filter(p => p.id !== rawId);
         const updated = { ...prev, playlists: nextPl };
@@ -3581,6 +3673,17 @@ function App() {
   };
 
   const addTrackToPlaylist = (track: Track, playlistId: string) => {
+    if (playlistId.startsWith("ytm-")) {
+      const rawId = playlistId.slice(4);
+      invoke("agregar_cancion_playlist_ytm", { playlistId: rawId, videoId: track.id })
+        .then(() => showToast("Canción sincronizada con YouTube Music."))
+        .catch(err => console.error("Error al sincronizar con YTM:", err));
+      const cached = getYtmCachedPlaylistTracks(rawId);
+      if (!cached.some(t => t.id === track.id)) {
+        const next = [...cached, track];
+        localStorage.setItem("capi_ytm_pl_v2_" + rawId, JSON.stringify(next));
+      }
+    }
     setPlaylists(prev => prev.map(p => {
       if (p.id === playlistId) {
         if (p.tracks.some(t => t.id === track.id)) return p;
@@ -3589,6 +3692,133 @@ function App() {
       return p;
     }));
     setShowAddToPlaylistModal(null);
+  };
+
+  const togglePlaylistSelection = (id: string) => {
+    setSelectedPlaylistIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const handleSelectAllPlaylists = () => {
+    const allIds: string[] = [
+      ...playlists.map(p => p.id),
+      ...(ytmSyncData.playlists ? ytmSyncData.playlists.map(p => "ytm-" + p.id) : [])
+    ];
+    if (selectedPlaylistIds.size === allIds.length) {
+      setSelectedPlaylistIds(new Set());
+    } else {
+      setSelectedPlaylistIds(new Set(allIds));
+    }
+  };
+
+  const handleBatchDownloadPlaylists = async () => {
+    if (selectedPlaylistIds.size === 0) return;
+    setIsBatchPlaylistDownloading(true);
+    showToast("Preparando canciones de las playlists seleccionadas...");
+
+    try {
+      const allTracksToDownload: Track[] = [];
+      const trackIdSet = new Set<string>();
+
+      for (const plId of selectedPlaylistIds) {
+        if (plId.startsWith("ytm-")) {
+          const rawId = plId.slice(4);
+          const ytmPl = ytmSyncData.playlists?.find(p => p.id === rawId);
+          let cached = getYtmCachedPlaylistTracks(rawId, ytmPl?.songCount);
+          if (cached.length === 0) {
+            try {
+              const res = await invoke<string>("obtener_playlist_ytm", { id: rawId });
+              const parsed = JSON.parse(res);
+              if (parsed?.tracks && Array.isArray(parsed.tracks)) {
+                cached = parsed.tracks;
+                localStorage.setItem("capi_ytm_pl_v2_" + rawId, JSON.stringify(cached));
+              }
+            } catch (e) {
+              console.error("Error obteniendo tracks de YTM:", e);
+            }
+          }
+          for (const trk of cached) {
+            if (!trackIdSet.has(trk.id) && !downloads[trk.id]) {
+              trackIdSet.add(trk.id);
+              allTracksToDownload.push(trk);
+            }
+          }
+        } else {
+          const pl = playlists.find(p => p.id === plId);
+          if (pl && pl.tracks) {
+            for (const trk of pl.tracks) {
+              if (!trackIdSet.has(trk.id) && !downloads[trk.id]) {
+                trackIdSet.add(trk.id);
+                allTracksToDownload.push(trk);
+              }
+            }
+          }
+        }
+      }
+
+      if (allTracksToDownload.length === 0) {
+        showToast("Todo el contenido de las playlists seleccionadas ya está descargado.");
+        return;
+      }
+
+      showToast(`Iniciando descarga de ${allTracksToDownload.length} canciones nuevas...`);
+      const concurrency = 3;
+      let index = 0;
+      const worker = async () => {
+        while (index < allTracksToDownload.length) {
+          const trk = allTracksToDownload[index++];
+          try {
+            await downloadTrack(trk);
+          } catch (e) {
+            console.error("Error descargando:", trk.title, e);
+          }
+        }
+      };
+
+      const workers = Array.from({ length: Math.min(concurrency, allTracksToDownload.length) }, () => worker());
+      await Promise.all(workers);
+      showToast(`Descarga completada: ${allTracksToDownload.length} canciones guardadas.`);
+      setShowPlaylistSelectionMode(false);
+      setSelectedPlaylistIds(new Set());
+    } catch (e) {
+      showToast("Error en descarga masiva: " + e);
+    } finally {
+      setIsBatchPlaylistDownloading(false);
+    }
+  };
+
+  const handleBatchDeletePlaylists = async () => {
+    if (selectedPlaylistIds.size === 0) return;
+    const count = selectedPlaylistIds.size;
+    if (!window.confirm(`¿Estás seguro de eliminar las ${count} listas de reproducción seleccionadas?`)) {
+      return;
+    }
+
+    const ids = Array.from(selectedPlaylistIds);
+    for (const plId of ids) {
+      if (plId.startsWith("ytm-")) {
+        const rawId = plId.slice(4);
+        invoke("eliminar_playlist_ytm", { playlistId: rawId }).catch(() => {});
+        setYtmSyncData(prev => {
+          const nextPl = prev.playlists.filter(p => p.id !== rawId);
+          const updated = { ...prev, playlists: nextPl };
+          localStorage.setItem("capi_ytm_sync_data", JSON.stringify(updated));
+          return updated;
+        });
+        localStorage.removeItem("capi_ytm_pl_v2_" + rawId);
+        localStorage.removeItem("capi_ytm_pl_tracks_" + rawId);
+      } else {
+        setPlaylists(prev => prev.filter(p => p.id !== plId));
+      }
+    }
+
+    setSelectedPlaylistIds(new Set());
+    setShowPlaylistSelectionMode(false);
+    showToast(`${count} listas de reproducción eliminadas.`);
   };
 
   const removeTrackFromPlaylist = (trackId: string, playlistId: string) => {
@@ -4559,28 +4789,17 @@ function App() {
 
           <div className="flex items-center gap-3 flex-shrink-0">
             {ytmAccount.loggedIn ? (
-              <div className="flex items-center gap-1.5">
-                <button
-                  onClick={handleSyncYtm}
-                  disabled={isSyncingYtm}
-                  className="px-3 py-1.5 rounded-xl bg-red-500/10 hover:bg-red-500/20 text-red-400 hover:text-red-300 border border-red-500/20 text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                  title="Sincronizar playlists y favoritos con YouTube Music"
-                >
-                  <RefreshCw className={`w-3.5 h-3.5 ${isSyncingYtm ? "animate-spin text-red-400" : "text-red-500"}`} />
-                  <span className="hidden sm:inline">{isSyncingYtm ? "Sincronizando..." : "Sincronizar"}</span>
-                </button>
-                <button
-                  onClick={() => setShowYtmModal(true)}
-                  className="w-8 h-8 rounded-full overflow-hidden border border-red-500/40 hover:border-red-500 transition cursor-pointer flex items-center justify-center bg-red-950/40"
-                  title={`YouTube Music: ${ytmAccount.name || ytmAccount.email || "Conectado"}`}
-                >
-                  {ytmAccount.photo ? (
-                    <img src={ytmAccount.photo} alt="YouTube" className="w-full h-full object-cover" />
-                  ) : (
-                    <YoutubeIcon className="w-4 h-4 text-red-500" />
-                  )}
-                </button>
-              </div>
+              <button
+                onClick={() => setShowYtmModal(true)}
+                className="w-8 h-8 rounded-full overflow-hidden border border-red-500/40 hover:border-red-500 transition cursor-pointer flex items-center justify-center bg-red-950/40 shadow-sm"
+                title={`YouTube Music: ${ytmAccount.name || ytmAccount.email || "Conectado"}`}
+              >
+                {ytmAccount.photo ? (
+                  <img src={ytmAccount.photo} alt="YouTube" className="w-full h-full object-cover" />
+                ) : (
+                  <YoutubeIcon className="w-4 h-4 text-red-500" />
+                )}
+              </button>
             ) : (
               <button
                 onClick={() => setShowYtmModal(true)}
@@ -6040,6 +6259,90 @@ function App() {
                       })}
                     </div>
                   )}
+
+                  {/* Playlists sincronizadas de YouTube Music en Inicio de Biblioteca */}
+                  {ytmSyncData.playlists && ytmSyncData.playlists.length > 0 && (
+                    <div className="space-y-4 pt-6 border-t border-white/5">
+                      <div className="flex items-center justify-between">
+                        <h3 className="text-base font-bold text-text-primary flex items-center gap-2 border-l-4 border-red-600 pl-2">
+                          <YoutubeIcon className="w-4 h-4 text-red-500 fill-current" />
+                          <span>Playlists de YouTube Music</span>
+                          <span className="text-xs text-text-secondary font-normal">({ytmSyncData.playlists.length})</span>
+                        </h3>
+                        <button
+                          onClick={() => setLibTab("youtube")}
+                          className="text-xs text-text-secondary hover:text-white transition flex items-center gap-1 cursor-pointer"
+                        >
+                          Ver todas en YouTube
+                          <ChevronLeft className="w-3.5 h-3.5 rotate-180" />
+                        </button>
+                      </div>
+                      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3 animate-fade-in">
+                        {ytmSyncData.playlists.map((p) => {
+                          const cachedCount = getYtmCachedPlaylistTracks(p.id, p.songCount).length;
+                          const songCountDisplay = p.songCount || cachedCount || null;
+                          return (
+                            <div
+                              key={"ytm-home-lib-" + p.id}
+                              onClick={() => openYtmPlaylist(p)}
+                              onContextMenu={(e) => {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                openPlaylistContextMenu(e, {
+                                  id: "ytm-" + p.id,
+                                  name: p.title,
+                                  tracks: getYtmCachedPlaylistTracks(p.id, p.songCount),
+                                  _coverOverride: p.thumbnail,
+                                });
+                              }}
+                              className="flex flex-col group cursor-pointer"
+                            >
+                              <div className="relative w-full aspect-square rounded-xl overflow-hidden bg-surface-dark/40 mb-2">
+                                {p.thumbnail ? (
+                                  <SafeImage src={p.thumbnail} alt={p.title} className="w-full h-full object-cover" />
+                                ) : (
+                                  <div className="w-full h-full flex items-center justify-center">
+                                    <Music className="w-8 h-8 text-text-secondary/40" />
+                                  </div>
+                                )}
+                                <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors rounded-xl" />
+                                <div className="absolute top-2 left-2 w-6 h-6 rounded-lg bg-black/75 backdrop-blur-md flex items-center justify-center border border-white/10 shadow-md pointer-events-none" title="YouTube Music">
+                                  <YoutubeIcon className="w-3.5 h-3.5 text-red-500 fill-current" />
+                                </div>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    playYtmPlaylistDirectly(p);
+                                  }}
+                                  className="absolute bottom-2 right-2 w-10 h-10 rounded-full bg-brand-primary text-bg-dark shadow-lg flex items-center justify-center opacity-0 group-hover:opacity-100 translate-y-2 group-hover:translate-y-0 transition-all duration-200 hover:scale-105"
+                                  title="Reproducir"
+                                >
+                                  <Play className="w-5 h-5 ml-0.5 fill-current" />
+                                </button>
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    openPlaylistContextMenu(e, {
+                                      id: "ytm-" + p.id,
+                                      name: p.title,
+                                      tracks: getYtmCachedPlaylistTracks(p.id, p.songCount),
+                                      _coverOverride: p.thumbnail,
+                                    });
+                                  }}
+                                  className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/50 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-200"
+                                  title="Más opciones"
+                                >
+                                  <MoreVertical className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                              <p className="text-xs font-semibold text-text-primary truncate" title={p.title}>{p.title}</p>
+                              <p className="text-[11px] text-text-secondary/70 truncate">{songCountDisplay ? `${songCountDisplay} canciones` : 'YouTube Music'}</p>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -6599,21 +6902,90 @@ function App() {
           {activeTab === "playlists" && (
             <div className="space-y-6">
               {!selectedPlaylistId && (
-                <div className="flex items-start justify-between">
-                  <div>
-                    <h2 className="text-2xl font-bold tracking-tight mb-2">Mis Listas de Reproducción</h2>
-                    <p className="text-sm text-text-secondary">Organiza tus colecciones musicales.</p>
+                <div className="flex flex-col gap-4">
+                  <div className="flex items-start justify-between">
+                    <div>
+                      <h2 className="text-2xl font-bold tracking-tight mb-2">Mis Listas de Reproducción</h2>
+                      <p className="text-sm text-text-secondary">Organiza tus colecciones musicales.</p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button
+                        onClick={() => {
+                          setShowPlaylistSelectionMode(prev => {
+                            if (prev) {
+                              setSelectedPlaylistIds(new Set());
+                            }
+                            return !prev;
+                          });
+                        }}
+                        className={`px-3.5 py-2 rounded-xl text-xs font-semibold transition flex items-center gap-1.5 cursor-pointer border ${
+                          showPlaylistSelectionMode
+                            ? "bg-brand-primary text-bg-dark border-brand-primary shadow-lg shadow-brand-primary/20"
+                            : "bg-surface-dark/40 hover:bg-surface-dark/80 text-text-secondary hover:text-white border-white/10 hover:border-brand-primary/40"
+                        }`}
+                        title="Seleccionar listas para descarga o eliminación masiva"
+                      >
+                        <CheckSquare className="w-4 h-4" />
+                        <span>{showPlaylistSelectionMode ? "Listo" : "Seleccionar"}</span>
+                      </button>
+                      <button
+                        onClick={() => setShowImportPlaylistModal(true)}
+                        className="p-2.5 bg-surface-dark/40 hover:bg-surface-dark/80 border border-white/10 hover:border-brand-primary/40 rounded-xl transition group cursor-pointer"
+                        title="Importar playlist desde URL"
+                      >
+                        <svg className="w-5 h-5 text-text-secondary group-hover:text-brand-primary transition" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+                          <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+                        </svg>
+                      </button>
+                    </div>
                   </div>
-                  <button
-                    onClick={() => setShowImportPlaylistModal(true)}
-                    className="p-2.5 bg-surface-dark/40 hover:bg-surface-dark/80 border border-white/10 hover:border-brand-primary/40 rounded-xl transition group cursor-pointer"
-                    title="Importar playlist desde URL"
-                  >
-                    <svg className="w-5 h-5 text-text-secondary group-hover:text-brand-primary transition" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
-                      <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
-                    </svg>
-                  </button>
+
+                  {/* Barra de acciones masivas */}
+                  {showPlaylistSelectionMode && (
+                    <div className="p-3.5 sm:p-4 rounded-2xl bg-surface-dark/80 border border-white/10 flex flex-wrap items-center justify-between gap-3 animate-fade-in shadow-xl backdrop-blur-md">
+                      <div className="flex items-center gap-3">
+                        <span className="text-xs font-bold px-3 py-1 rounded-lg bg-brand-primary/20 text-brand-primary border border-brand-primary/30">
+                          {selectedPlaylistIds.size} seleccionada{selectedPlaylistIds.size === 1 ? "" : "s"}
+                        </span>
+                        <button
+                          onClick={handleSelectAllPlaylists}
+                          className="text-xs text-text-secondary hover:text-white underline cursor-pointer"
+                        >
+                          {selectedPlaylistIds.size === (playlists.length + (ytmSyncData.playlists?.length || 0)) ? "Deseleccionar todo" : "Seleccionar todo"}
+                        </button>
+                      </div>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <button
+                          onClick={handleBatchDownloadPlaylists}
+                          disabled={selectedPlaylistIds.size === 0 || isBatchPlaylistDownloading}
+                          className="px-3.5 py-1.5 rounded-xl bg-brand-primary/20 hover:bg-brand-primary text-brand-primary hover:text-bg-dark border border-brand-primary/30 font-semibold text-xs transition flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                          title="Descargar canciones de las playlists seleccionadas"
+                        >
+                          <Download className={`w-3.5 h-3.5 ${isBatchPlaylistDownloading ? "animate-bounce" : ""}`} />
+                          <span>{isBatchPlaylistDownloading ? "Descargando..." : "Descargar contenido"}</span>
+                        </button>
+                        <button
+                          onClick={handleBatchDeletePlaylists}
+                          disabled={selectedPlaylistIds.size === 0 || isBatchPlaylistDownloading}
+                          className="px-3.5 py-1.5 rounded-xl bg-red-500/20 hover:bg-red-500 text-red-400 hover:text-white border border-red-500/30 font-semibold text-xs transition flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                          title="Eliminar playlists seleccionadas"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Eliminar seleccionadas</span>
+                        </button>
+                        <button
+                          onClick={() => {
+                            setShowPlaylistSelectionMode(false);
+                            setSelectedPlaylistIds(new Set());
+                          }}
+                          className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-text-secondary hover:text-white border border-white/10 text-xs font-semibold transition cursor-pointer"
+                        >
+                          Cancelar
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
 
@@ -6957,64 +7329,107 @@ function App() {
                     <p className="text-xs font-semibold text-text-secondary group-hover:text-text-primary truncate text-center">Crear Lista</p>
                   </div>
 
-                  {playlists.map((playlist) => (
-                    <div
-                      key={playlist.id}
-                      onClick={() => setSelectedPlaylistId(playlist.id)}
-                      onContextMenu={(e) => openPlaylistContextMenu(e, playlist)}
-                      className="flex flex-col group cursor-pointer"
-                    >
-                      <div className="relative w-full aspect-square rounded-xl overflow-hidden bg-surface-dark/40 mb-2 group">
-                        {getPlaylistCover(playlist) ? (
-                          <SafeImage src={getPlaylistCover(playlist)} alt={playlist.name} className="w-full h-full object-cover" />
-                        ) : (
-                          <div className="w-full h-full flex items-center justify-center">
-                            <Music className="w-8 h-8 text-text-secondary/40" />
-                          </div>
-                        )}
-                        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors rounded-xl" />
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            if (playlist.tracks.length > 0) {
-                              playTrack(playlist.tracks[0], playlist.tracks);
-                            }
-                          }}
-                          className="absolute bottom-2 right-2 w-10 h-10 rounded-full bg-brand-primary text-bg-dark shadow-lg flex items-center justify-center opacity-0 group-hover:opacity-100 translate-y-2 group-hover:translate-y-0 transition-all duration-200 hover:scale-105"
-                        >
-                          <Play className="w-5 h-5 ml-0.5 fill-current" />
-                        </button>
-                        <button
-                          onClick={(e) => { e.stopPropagation(); openPlaylistContextMenu(e, playlist); }}
-                          className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/50 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-200"
-                        >
-                          <MoreVertical className="w-3.5 h-3.5" />
-                        </button>
+                  {playlists.map((playlist) => {
+                    const isSelected = selectedPlaylistIds.has(playlist.id);
+                    return (
+                      <div
+                        key={playlist.id}
+                        onClick={() => {
+                          if (showPlaylistSelectionMode) {
+                            togglePlaylistSelection(playlist.id);
+                          } else {
+                            setSelectedPlaylistId(playlist.id);
+                          }
+                        }}
+                        onContextMenu={(e) => {
+                          if (showPlaylistSelectionMode) return;
+                          openPlaylistContextMenu(e, playlist);
+                        }}
+                        className={`flex flex-col group cursor-pointer relative p-2 rounded-2xl transition duration-200 ${
+                          showPlaylistSelectionMode && isSelected
+                            ? "bg-brand-primary/10 ring-2 ring-brand-primary"
+                            : "hover:bg-white/5"
+                        }`}
+                      >
+                        <div className="relative w-full aspect-square rounded-xl overflow-hidden bg-surface-dark/40 mb-2 group">
+                          {getPlaylistCover(playlist) ? (
+                            <SafeImage src={getPlaylistCover(playlist)} alt={playlist.name} className="w-full h-full object-cover" />
+                          ) : (
+                            <div className="w-full h-full flex items-center justify-center">
+                              <Music className="w-8 h-8 text-text-secondary/40" />
+                            </div>
+                          )}
+                          <div className="absolute inset-0 bg-black/0 group-hover:bg-black/30 transition-colors rounded-xl" />
+
+                          {/* Modo selección: checkmark overlay */}
+                          {showPlaylistSelectionMode ? (
+                            <div className={`absolute top-2 right-2 w-6 h-6 rounded-lg flex items-center justify-center shadow-md transition-all ${
+                              isSelected
+                                ? "bg-brand-primary text-bg-dark border border-brand-primary"
+                                : "bg-black/60 border border-white/20 text-transparent"
+                            }`}>
+                              <Check className="w-3.5 h-3.5 stroke-[3]" />
+                            </div>
+                          ) : (
+                            <>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (playlist.tracks.length > 0) {
+                                    playTrack(playlist.tracks[0], playlist.tracks);
+                                  }
+                                }}
+                                className="absolute bottom-2 right-2 w-10 h-10 rounded-full bg-brand-primary text-bg-dark shadow-lg flex items-center justify-center opacity-0 group-hover:opacity-100 translate-y-2 group-hover:translate-y-0 transition-all duration-200 hover:scale-105"
+                              >
+                                <Play className="w-5 h-5 ml-0.5 fill-current" />
+                              </button>
+                              <button
+                                onClick={(e) => { e.stopPropagation(); openPlaylistContextMenu(e, playlist); }}
+                                className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/50 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-200"
+                              >
+                                <MoreVertical className="w-3.5 h-3.5" />
+                              </button>
+                            </>
+                          )}
+                        </div>
+                        <p className="text-xs font-semibold text-text-primary truncate">{playlist.name}</p>
+                        <p className="text-[11px] text-text-secondary/70 truncate">{playlist.tracks.length} canciones</p>
                       </div>
-                      <p className="text-xs font-semibold text-text-primary truncate">{playlist.name}</p>
-                      <p className="text-[11px] text-text-secondary/70 truncate">{playlist.tracks.length} canciones</p>
-                    </div>
-                  ))}
+                    );
+                  })}
 
                   {/* Playlists sincronizadas de YouTube Music */}
                   {ytmSyncData.playlists && ytmSyncData.playlists.map((p) => {
                     const cachedCount = getYtmCachedPlaylistTracks(p.id, p.songCount).length;
                     const songCountDisplay = p.songCount || cachedCount || null;
+                    const plId = "ytm-" + p.id;
+                    const isSelected = selectedPlaylistIds.has(plId);
                     return (
                       <div
-                        key={"ytm-" + p.id}
-                        onClick={() => openYtmPlaylist(p)}
+                        key={plId}
+                        onClick={() => {
+                          if (showPlaylistSelectionMode) {
+                            togglePlaylistSelection(plId);
+                          } else {
+                            openYtmPlaylist(p);
+                          }
+                        }}
                         onContextMenu={(e) => {
+                          if (showPlaylistSelectionMode) return;
                           e.preventDefault();
                           e.stopPropagation();
                           openPlaylistContextMenu(e, {
-                            id: "ytm-" + p.id,
+                            id: plId,
                             name: p.title,
                             tracks: getYtmCachedPlaylistTracks(p.id, p.songCount),
                             _coverOverride: p.thumbnail,
                           });
                         }}
-                        className="flex flex-col group cursor-pointer"
+                        className={`flex flex-col group cursor-pointer relative p-2 rounded-2xl transition duration-200 ${
+                          showPlaylistSelectionMode && isSelected
+                            ? "bg-brand-primary/10 ring-2 ring-brand-primary"
+                            : "hover:bg-white/5"
+                        }`}
                       >
                         <div className="relative w-full aspect-square rounded-xl overflow-hidden bg-surface-dark/40 mb-2 group">
                           {p.thumbnail ? (
@@ -7031,31 +7446,44 @@ function App() {
                             <YoutubeIcon className="w-3.5 h-3.5 text-red-500 fill-current" />
                           </div>
 
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              playYtmPlaylistDirectly(p);
-                            }}
-                            className="absolute bottom-2 right-2 w-10 h-10 rounded-full bg-brand-primary text-bg-dark shadow-lg flex items-center justify-center opacity-0 group-hover:opacity-100 translate-y-2 group-hover:translate-y-0 transition-all duration-200 hover:scale-105"
-                            title="Reproducir"
-                          >
-                            <Play className="w-5 h-5 ml-0.5 fill-current" />
-                          </button>
-                          <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              openPlaylistContextMenu(e, {
-                                id: "ytm-" + p.id,
-                                name: p.title,
-                                tracks: getYtmCachedPlaylistTracks(p.id, p.songCount),
-                                _coverOverride: p.thumbnail,
-                              });
-                            }}
-                            className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/50 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-200"
-                            title="Más opciones"
-                          >
-                            <MoreVertical className="w-3.5 h-3.5" />
-                          </button>
+                          {/* Modo selección: checkmark overlay */}
+                          {showPlaylistSelectionMode ? (
+                            <div className={`absolute top-2 right-2 w-6 h-6 rounded-lg flex items-center justify-center shadow-md transition-all ${
+                              isSelected
+                                ? "bg-brand-primary text-bg-dark border border-brand-primary"
+                                : "bg-black/60 border border-white/20 text-transparent"
+                            }`}>
+                              <Check className="w-3.5 h-3.5 stroke-[3]" />
+                            </div>
+                          ) : (
+                            <>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  playYtmPlaylistDirectly(p);
+                                }}
+                                className="absolute bottom-2 right-2 w-10 h-10 rounded-full bg-brand-primary text-bg-dark shadow-lg flex items-center justify-center opacity-0 group-hover:opacity-100 translate-y-2 group-hover:translate-y-0 transition-all duration-200 hover:scale-105"
+                                title="Reproducir"
+                              >
+                                <Play className="w-5 h-5 ml-0.5 fill-current" />
+                              </button>
+                              <button
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  openPlaylistContextMenu(e, {
+                                    id: plId,
+                                    name: p.title,
+                                    tracks: getYtmCachedPlaylistTracks(p.id, p.songCount),
+                                    _coverOverride: p.thumbnail,
+                                  });
+                                }}
+                                className="absolute top-2 right-2 w-7 h-7 rounded-full bg-black/50 text-white flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity duration-200"
+                                title="Más opciones"
+                              >
+                                <MoreVertical className="w-3.5 h-3.5" />
+                              </button>
+                            </>
+                          )}
                         </div>
                         <p className="text-xs font-semibold text-text-primary truncate" title={p.title}>{p.title}</p>
                         <p className="text-[11px] text-text-secondary/70 truncate mt-0.5">
@@ -8826,19 +9254,21 @@ function App() {
 
           {/* PROFILE VIEW */}
           {activeTab === "perfil" && (
-            <div className="space-y-6 max-w-2xl animate-fade-in text-left">
+            <div className="space-y-6 max-w-3xl animate-fade-in text-left">
               <div className="relative rounded-3xl overflow-hidden h-48 bg-gradient-to-tr from-brand-primary/20 via-brand-tertiary/10 to-bg-dark border border-white/5 flex items-end p-8">
                 <div className="relative z-10 flex items-center gap-6">
                   <div className="w-20 h-20 rounded-full overflow-hidden border-2 border-white/20 shadow-xl bg-surface-dark flex items-center justify-center flex-shrink-0">
                     <img 
-                      src={capiAvatar || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?q=80&w=150"} 
+                      src={capiAvatar || ytmAccount.photo || "https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?q=80&w=150"} 
                       alt="Perfil" 
                       className="w-full h-full object-cover" 
                     />
                   </div>
                   <div>
-                    <h2 className="text-3xl font-extrabold tracking-tight text-text-primary">{capiUsername || "Usuario Capi"}</h2>
-                    <p className="text-sm text-text-secondary mt-1 font-semibold">Plan Capi Max</p>
+                    <h2 className="text-3xl font-extrabold tracking-tight text-text-primary">{capiUsername || ytmAccount.name || "Usuario Capi"}</h2>
+                    <p className="text-sm text-text-secondary mt-1 font-semibold">
+                      {ytmAccount.loggedIn ? (ytmAccount.email || "Conectado con YouTube Music") : "Plan Capi Max"}
+                    </p>
                   </div>
                 </div>
               </div>
@@ -8867,6 +9297,145 @@ function App() {
                     <ChevronLeft className="w-5 h-5 rotate-180 text-text-secondary group-hover:text-brand-primary transition-transform duration-200" />
                   </button>
                 </div>
+              </div>
+
+              {/* GESTIÓN DE YOUTUBE MUSIC EN PERFIL */}
+              <div className="bg-surface-dark/40 border border-white/5 rounded-2xl p-6 space-y-6">
+                <div className="border-b border-white/5 pb-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h3 className="font-semibold text-base text-text-primary flex items-center gap-2">
+                        <YoutubeIcon className="w-5 h-5 text-red-500" /> Sincronización con YouTube Music
+                      </h3>
+                      <p className="text-xs text-text-secondary mt-1">
+                        Gestiona tu cuenta vinculada, sincroniza tus listas, me gusta y suscripciones.
+                      </p>
+                    </div>
+                    {ytmAccount.loggedIn && (
+                      <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                        <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                        Conectado
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                {ytmAccount.loggedIn ? (
+                  <div className="space-y-6">
+                    {/* Tarjeta de cuenta conectada */}
+                    <div className="p-5 rounded-2xl bg-gradient-to-r from-red-950/40 via-surface-dark/50 to-surface-dark/30 border border-red-500/20 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+                      <div className="flex items-center gap-4">
+                        <div className="w-14 h-14 rounded-2xl overflow-hidden bg-red-600/20 border border-red-500/30 flex items-center justify-center flex-shrink-0">
+                          {ytmAccount.photo ? (
+                            <img src={ytmAccount.photo} alt="YouTube Avatar" className="w-full h-full object-cover" />
+                          ) : (
+                            <YoutubeIcon className="w-7 h-7 text-red-500" />
+                          )}
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-white text-base">{ytmAccount.name || "Usuario de YouTube Music"}</h4>
+                          <p className="text-xs text-text-secondary mt-0.5">{ytmAccount.email || "Cuenta vinculada con éxito"}</p>
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-2 self-end sm:self-auto flex-wrap">
+                        <button
+                          onClick={handleSyncYtm}
+                          disabled={isSyncingYtm}
+                          className="px-4 py-2 rounded-xl bg-red-600 hover:bg-red-500 text-white font-semibold text-xs transition flex items-center gap-1.5 shadow-lg shadow-red-600/20 cursor-pointer disabled:opacity-50"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${isSyncingYtm ? "animate-spin" : ""}`} />
+                          <span>{isSyncingYtm ? "Sincronizando..." : "Sincronizar ahora"}</span>
+                        </button>
+                        <button
+                          onClick={handleLogoutYtm}
+                          className="px-3 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-text-secondary hover:text-red-400 border border-white/10 text-xs font-semibold transition cursor-pointer"
+                        >
+                          Cerrar sesión
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* Métricas de sincronización */}
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                      <div className="p-4 rounded-xl bg-surface-dark/40 border border-white/5 flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-red-500/10 text-red-400 flex items-center justify-center flex-shrink-0">
+                          <ListMusic className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <p className="text-xl font-bold text-text-primary">{ytmSyncData.playlists?.length || 0}</p>
+                          <p className="text-xs text-text-secondary">Playlists sincronizadas</p>
+                        </div>
+                      </div>
+                      <div className="p-4 rounded-xl bg-surface-dark/40 border border-white/5 flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-red-500/10 text-red-400 flex items-center justify-center flex-shrink-0">
+                          <Heart className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <p className="text-xl font-bold text-text-primary">{ytmSyncData.likedSongs?.length || 0}</p>
+                          <p className="text-xs text-text-secondary">Canciones que te gustan</p>
+                        </div>
+                      </div>
+                      <div className="p-4 rounded-xl bg-surface-dark/40 border border-white/5 flex items-center gap-3">
+                        <div className="w-10 h-10 rounded-xl bg-red-500/10 text-red-400 flex items-center justify-center flex-shrink-0">
+                          <Users className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <p className="text-xl font-bold text-text-primary">{ytmSyncData.artists?.length || 0}</p>
+                          <p className="text-xs text-text-secondary">Artistas suscritos</p>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-6">
+                    <div className="p-6 rounded-2xl bg-gradient-to-r from-red-950/30 via-surface-dark/50 to-surface-dark/30 border border-red-500/20 flex flex-col md:flex-row items-center justify-between gap-6">
+                      <div className="flex items-center gap-4">
+                        <div className="w-14 h-14 rounded-2xl bg-red-600/20 border border-red-500/30 flex items-center justify-center text-red-500 flex-shrink-0">
+                          <YoutubeIcon className="w-8 h-8" />
+                        </div>
+                        <div>
+                          <h4 className="font-bold text-white text-base">Inicia sesión con tu cuenta de YouTube Music</h4>
+                          <p className="text-xs text-text-secondary mt-1 max-w-lg leading-relaxed">
+                            Al iniciar sesión, Capi sincronizará automáticamente tus playlists, canciones favoritas y artistas suscritos.
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={handleOpenYtmLoginWindow}
+                        className="w-full md:w-auto px-6 py-3 rounded-2xl bg-red-600 hover:bg-red-500 text-white font-bold text-xs transition flex items-center justify-center gap-2 shadow-lg shadow-red-600/30 cursor-pointer flex-shrink-0"
+                      >
+                        <YoutubeIcon className="w-4 h-4" />
+                        <span>Iniciar sesión con Google</span>
+                      </button>
+                    </div>
+
+                    {/* Entrada manual alternativa */}
+                    <div className="p-4 rounded-xl bg-surface-dark/30 border border-white/5 space-y-3">
+                      <h4 className="text-xs font-semibold text-text-primary flex items-center gap-1.5">
+                        <Key className="w-3.5 h-3.5 text-text-secondary" /> Método alternativo: Pegar Cookie manualmente
+                      </h4>
+                      <p className="text-[11px] text-text-secondary">
+                        Si prefieres no usar la ventana integrada de Google, puedes pegar aquí tus cookies de YouTube Music:
+                      </p>
+                      <div className="flex gap-2">
+                        <input
+                          type="password"
+                          value={ytmCookieInput}
+                          onChange={(e) => setYtmCookieInput(e.target.value)}
+                          placeholder="SAPISID=...; SSID=...; HSID=..."
+                          className="flex-1 bg-black/40 border border-white/10 rounded-xl px-3 py-2 text-xs text-white placeholder-text-secondary/50 focus:outline-none focus:border-red-500 font-mono"
+                        />
+                        <button
+                          onClick={handleSaveYtmCookie}
+                          disabled={!ytmCookieInput.trim()}
+                          className="px-4 py-2 bg-white/10 hover:bg-white/20 text-white rounded-xl text-xs font-semibold transition cursor-pointer disabled:opacity-40"
+                        >
+                          Guardar
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}
@@ -10561,7 +11130,7 @@ function App() {
 
       {/* Create Playlist Modal */}
       {showCreatePlaylistModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60] animate-fade-in" onClick={() => setShowCreatePlaylistModal(false)}>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60] animate-fade-in" onClick={() => { setShowCreatePlaylistModal(false); setSyncNewPlaylistWithYtm(false); }}>
           <div className="glass p-6 rounded-2xl max-w-sm w-full border border-white/10 shadow-2xl mx-4 modal-content" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-lg font-bold mb-4">Crear Nueva Lista</h3>
             <input
@@ -10570,7 +11139,7 @@ function App() {
               onChange={(e) => setNewPlaylistName(e.target.value)}
               placeholder="Nombre de la lista de reproducción..."
               autoFocus
-              className="w-full bg-surface-dark border border-white/10 rounded-xl px-4 py-2.5 text-sm text-text-primary placeholder-text-secondary focus:outline-none focus:border-brand-primary focus:ring-1 focus:ring-brand-primary mb-6 transition duration-200"
+              className="w-full bg-surface-dark border border-white/10 rounded-xl px-4 py-2.5 text-sm text-text-primary placeholder-text-secondary focus:outline-none focus:border-brand-primary focus:ring-1 focus:ring-brand-primary mb-4 transition duration-200"
               onKeyDown={(e) => {
                 if (e.key === "Enter") {
                   createPlaylist();
@@ -10578,11 +11147,46 @@ function App() {
                 }
               }}
             />
+
+            {/* Switch Sincronizar con YouTube */}
+            <div className="flex items-center justify-between p-3 rounded-xl bg-surface-dark/70 border border-white/10 mb-6">
+              <div className="flex items-center gap-2.5">
+                <div className="w-8 h-8 rounded-lg bg-red-500/10 flex items-center justify-center text-red-500 flex-shrink-0">
+                  <YoutubeIcon className="w-4 h-4 fill-current" />
+                </div>
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-text-primary">Sincronizar con YouTube</p>
+                  <p className="text-[10px] text-text-secondary truncate">Crear también en tu cuenta de YouTube Music</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  if (!ytmAccount.loggedIn) {
+                    showToast("Inicia sesión en YouTube Music primero.");
+                    return;
+                  }
+                  setSyncNewPlaylistWithYtm(prev => !prev);
+                }}
+                className={`w-11 h-6 rounded-full transition-colors relative p-0.5 cursor-pointer flex-shrink-0 ml-2 ${
+                  syncNewPlaylistWithYtm ? "bg-red-600" : "bg-white/10"
+                }`}
+                title="Sincronizar esta lista con YouTube Music"
+              >
+                <div
+                  className={`w-5 h-5 rounded-full bg-white transition-transform duration-200 shadow-md ${
+                    syncNewPlaylistWithYtm ? "translate-x-5" : "translate-x-0"
+                  }`}
+                />
+              </button>
+            </div>
+
             <div className="flex justify-end gap-3">
               <button
                 onClick={() => {
                   setShowCreatePlaylistModal(false);
                   setNewPlaylistName("");
+                  setSyncNewPlaylistWithYtm(false);
                 }}
                 className="px-4 py-2 rounded-xl text-text-secondary hover:text-text-primary text-sm font-semibold transition"
               >
