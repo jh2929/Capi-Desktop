@@ -1,5 +1,5 @@
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -47,7 +47,9 @@ pub fn start_mcp_server(
         }
     }
 
-    let port = chosen_port.ok_or_else(|| "No se pudo encontrar un puerto libre para MCP en el rango 19840-19855".to_string())?;
+    let port = chosen_port.ok_or_else(|| {
+        "No se pudo encontrar un puerto libre para MCP en el rango 19840-19855".to_string()
+    })?;
     MCP_PORT.store(port, Ordering::SeqCst);
 
     let engine_clone = engine.clone();
@@ -286,28 +288,26 @@ pub async fn handle_mcp_request(
     engine: &Arc<Engine>,
     media_state: &Arc<Mutex<MediaState>>,
     app_handle: &tauri::AppHandle,
-    capi_dir: &PathBuf,
+    capi_dir: &Path,
 ) -> Option<Value> {
     let method = req.get("method")?.as_str()?;
     let id = req.get("id").cloned();
 
     match method {
-        "initialize" => {
-            Some(json!({
-                "jsonrpc": "2.0",
-                "id": id,
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {
-                        "tools": { "listChanged": false }
-                    },
-                    "serverInfo": {
-                        "name": "capi-desktop-mcp",
-                        "version": env!("CARGO_PKG_VERSION")
-                    }
+        "initialize" => Some(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "capabilities": {
+                    "tools": { "listChanged": false }
+                },
+                "serverInfo": {
+                    "name": "capi-desktop-mcp",
+                    "version": env!("CARGO_PKG_VERSION")
                 }
-            }))
-        }
+            }
+        })),
 
         "notifications/initialized" | "initialized" => None,
 
@@ -576,7 +576,7 @@ async fn execute_tool(
     engine: &Arc<Engine>,
     media_state: &Arc<Mutex<MediaState>>,
     app_handle: &tauri::AppHandle,
-    capi_dir: &PathBuf,
+    capi_dir: &Path,
 ) -> (String, bool) {
     match name {
         "capi_get_player_state" => {
@@ -597,7 +597,10 @@ async fn execute_tool(
                 "repeat": guard.repeat,
                 "track_id": guard.track_id
             });
-            (serde_json::to_string_pretty(&state_json).unwrap_or_default(), false)
+            (
+                serde_json::to_string_pretty(&state_json).unwrap_or_default(),
+                false,
+            )
         }
 
         "capi_play" => {
@@ -627,55 +630,76 @@ async fn execute_tool(
 
         "capi_set_volume" => {
             let raw_level = args.get("level").and_then(|v| v.as_f64()).unwrap_or(0.8);
-            let level = if raw_level > 1.0 { raw_level / 100.0 } else { raw_level };
+            let level = if raw_level > 1.0 {
+                raw_level / 100.0
+            } else {
+                raw_level
+            };
             let clamped = level.clamp(0.0, 1.0);
-            let _ = app_handle.emit("mpris-command", json!({ "action": "volume", "level": clamped }));
-            (format!("Volumen establecido a {:.0}%", clamped * 100.0), false)
+            let _ = app_handle.emit(
+                "mpris-command",
+                json!({ "action": "volume", "level": clamped }),
+            );
+            (
+                format!("Volumen establecido a {:.0}%", clamped * 100.0),
+                false,
+            )
         }
 
         "capi_seek" => {
             let pos = args.get("position").and_then(|v| v.as_f64()).unwrap_or(0.0);
-            let _ = app_handle.emit("mpris-command", json!({ "action": "seek", "position": pos }));
+            let _ = app_handle.emit(
+                "mpris-command",
+                json!({ "action": "seek", "position": pos }),
+            );
             (format!("Posición establecida a {:.1}s", pos), false)
         }
 
         "capi_search" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             if query.trim().is_empty() {
-                return ("El término de búsqueda no puede estar vacío".to_string(), true);
+                return (
+                    "El término de búsqueda no puede estar vacío".to_string(),
+                    true,
+                );
             }
-            let filter = args.get("filter").and_then(|v| v.as_str()).unwrap_or("songs");
+            let filter = args
+                .get("filter")
+                .and_then(|v| v.as_str())
+                .unwrap_or("songs");
 
             match filter {
-                "playlists" => {
-                    match engine.search_playlists(query).await {
-                        Ok(playlists) => {
-                            let json_val = serde_json::to_string_pretty(&playlists).unwrap_or_default();
-                            (json_val, false)
-                        }
-                        Err(e) => (format!("Error en búsqueda de playlists: {}", e), true),
+                "playlists" => match engine.search_playlists(query).await {
+                    Ok(playlists) => {
+                        let json_val = serde_json::to_string_pretty(&playlists).unwrap_or_default();
+                        (json_val, false)
                     }
-                }
-                _ => {
-                    match engine.search(query).await {
-                        Ok(songs) => {
-                            let json_val = serde_json::to_string_pretty(&songs).unwrap_or_default();
-                            (json_val, false)
-                        }
-                        Err(e) => (format!("Error en búsqueda: {}", e), true),
+                    Err(e) => (format!("Error en búsqueda de playlists: {}", e), true),
+                },
+                _ => match engine.search(query).await {
+                    Ok(songs) => {
+                        let json_val = serde_json::to_string_pretty(&songs).unwrap_or_default();
+                        (json_val, false)
                     }
-                }
+                    Err(e) => (format!("Error en búsqueda: {}", e), true),
+                },
             }
         }
 
         "capi_play_track" => {
             let query = args.get("query").and_then(|v| v.as_str()).unwrap_or("");
             if query.trim().is_empty() {
-                return ("El parámetro 'query' no puede estar vacío".to_string(), true);
+                return (
+                    "El parámetro 'query' no puede estar vacío".to_string(),
+                    true,
+                );
             }
 
             // Si es un ID de video directo (11 caracteres alfanuméricos)
-            let is_direct_id = query.len() == 11 && query.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+            let is_direct_id = query.len() == 11
+                && query
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
 
             let song_to_play: Option<Song> = if is_direct_id {
                 match engine.search(query).await {
@@ -687,7 +711,10 @@ async fn execute_tool(
                             primary_artist: None,
                             album: None,
                             duration: None,
-                            thumbnail: Some(format!("https://i.ytimg.com/vi/{}/hqdefault.jpg", query)),
+                            thumbnail: Some(format!(
+                                "https://i.ytimg.com/vi/{}/hqdefault.jpg",
+                                query
+                            )),
                             explicit: false,
                             artist_id: None,
                         })
@@ -712,27 +739,54 @@ async fn execute_tool(
             };
 
             if let Some(song) = song_to_play {
-                let _ = app_handle.emit("mcp-command", json!({
-                    "action": "play-track",
-                    "track": song
-                }));
-                (format!("Reproduciendo en Capi: '{}' por '{}'", song.title, song.artist), false)
+                let _ = app_handle.emit(
+                    "mcp-command",
+                    json!({
+                        "action": "play-track",
+                        "track": song
+                    }),
+                );
+                (
+                    format!(
+                        "Reproduciendo en Capi: '{}' por '{}'",
+                        song.title, song.artist
+                    ),
+                    false,
+                )
             } else {
-                (format!("No se encontraron canciones para '{}'", query), true)
+                (
+                    format!("No se encontraron canciones para '{}'", query),
+                    true,
+                )
             }
         }
 
         "capi_get_lyrics" => {
             let (track_id, title, artist, duration) = {
                 let guard = media_state.lock().ok();
-                let current_id = guard.as_ref().map(|g| g.track_id.clone()).unwrap_or_default();
+                let current_id = guard
+                    .as_ref()
+                    .map(|g| g.track_id.clone())
+                    .unwrap_or_default();
                 let current_title = guard.as_ref().map(|g| g.title.clone()).unwrap_or_default();
                 let current_artist = guard.as_ref().map(|g| g.artist.clone()).unwrap_or_default();
                 let current_duration = guard.as_ref().map(|g| g.duration as u32).unwrap_or(0);
 
-                let id = args.get("track_id").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or(current_id);
-                let t = args.get("title").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or(current_title);
-                let a = args.get("artist").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or(current_artist);
+                let id = args
+                    .get("track_id")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or(current_id);
+                let t = args
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or(current_title);
+                let a = args
+                    .get("artist")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or(current_artist);
                 (id, t, a, current_duration)
             };
 
@@ -740,7 +794,10 @@ async fn execute_tool(
                 return ("No hay ninguna canción reproduciéndose y no se especificó 'title' o 'track_id'".to_string(), true);
             }
 
-            match engine.lyrics(&track_id, &title, &artist, duration, None).await {
+            match engine
+                .lyrics(&track_id, &title, &artist, duration, None)
+                .await
+            {
                 Ok(lyrics) => {
                     let json_val = serde_json::to_string_pretty(&lyrics).unwrap_or_default();
                     (json_val, false)
@@ -749,20 +806,24 @@ async fn execute_tool(
             }
         }
 
-        "capi_get_playlists" => {
-            match engine.sync_ytm().await {
-                Ok(data) => {
-                    let json_val = serde_json::to_string_pretty(&data.playlists).unwrap_or_default();
-                    (json_val, false)
-                }
-                Err(e) => (format!("Error obteniendo playlists: {}", e), true),
+        "capi_get_playlists" => match engine.sync_ytm().await {
+            Ok(data) => {
+                let json_val = serde_json::to_string_pretty(&data.playlists).unwrap_or_default();
+                (json_val, false)
             }
-        }
+            Err(e) => (format!("Error obteniendo playlists: {}", e), true),
+        },
 
         "capi_get_playlist_tracks" => {
-            let playlist_id = args.get("playlist_id").and_then(|v| v.as_str()).unwrap_or("");
+            let playlist_id = args
+                .get("playlist_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if playlist_id.trim().is_empty() {
-                return ("El parámetro 'playlist_id' es obligatorio".to_string(), true);
+                return (
+                    "El parámetro 'playlist_id' es obligatorio".to_string(),
+                    true,
+                );
             }
 
             match engine.playlist_tracks(playlist_id).await {
@@ -770,41 +831,57 @@ async fn execute_tool(
                     let json_val = serde_json::to_string_pretty(&tracks).unwrap_or_default();
                     (json_val, false)
                 }
-                Err(e) => (format!("Error obteniendo canciones de playlist: {}", e), true),
+                Err(e) => (
+                    format!("Error obteniendo canciones de playlist: {}", e),
+                    true,
+                ),
             }
         }
 
         "capi_play_playlist" => {
-            let playlist_id = args.get("playlist_id").and_then(|v| v.as_str()).unwrap_or("");
+            let playlist_id = args
+                .get("playlist_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if playlist_id.trim().is_empty() {
-                return ("El parámetro 'playlist_id' es obligatorio".to_string(), true);
+                return (
+                    "El parámetro 'playlist_id' es obligatorio".to_string(),
+                    true,
+                );
             }
 
             match engine.playlist_tracks(playlist_id).await {
                 Ok(tracks) => {
                     if tracks.is_empty() {
-                        return ("La playlist está vacía o no tiene canciones accesibles".to_string(), true);
+                        return (
+                            "La playlist está vacía o no tiene canciones accesibles".to_string(),
+                            true,
+                        );
                     }
-                    let _ = app_handle.emit("mcp-command", json!({
-                        "action": "play-playlist",
-                        "tracks": tracks,
-                        "playlistId": playlist_id
-                    }));
-                    (format!("Reproduciendo playlist con {} canciones", tracks.len()), false)
+                    let _ = app_handle.emit(
+                        "mcp-command",
+                        json!({
+                            "action": "play-playlist",
+                            "tracks": tracks,
+                            "playlistId": playlist_id
+                        }),
+                    );
+                    (
+                        format!("Reproduciendo playlist con {} canciones", tracks.len()),
+                        false,
+                    )
                 }
                 Err(e) => (format!("Error al cargar playlist: {}", e), true),
             }
         }
 
-        "capi_get_liked_songs" => {
-            match engine.sync_ytm().await {
-                Ok(data) => {
-                    let json_val = serde_json::to_string_pretty(&data.liked_songs).unwrap_or_default();
-                    (json_val, false)
-                }
-                Err(e) => (format!("Error obteniendo canciones favoritas: {}", e), true),
+        "capi_get_liked_songs" => match engine.sync_ytm().await {
+            Ok(data) => {
+                let json_val = serde_json::to_string_pretty(&data.liked_songs).unwrap_or_default();
+                (json_val, false)
             }
-        }
+            Err(e) => (format!("Error obteniendo canciones favoritas: {}", e), true),
+        },
 
         "capi_like_track" => {
             let video_id = args.get("video_id").and_then(|v| v.as_str()).unwrap_or("");
@@ -815,31 +892,38 @@ async fn execute_tool(
 
             match engine.like_video(video_id, like).await {
                 Ok(res) => {
-                    let _ = app_handle.emit("mcp-command", json!({
-                        "action": "like-track",
-                        "videoId": video_id,
-                        "like": like
-                    }));
-                    (format!("Estado de Me Gusta actualizado (éxito: {})", res), false)
+                    let _ = app_handle.emit(
+                        "mcp-command",
+                        json!({
+                            "action": "like-track",
+                            "videoId": video_id,
+                            "like": like
+                        }),
+                    );
+                    (
+                        format!("Estado de Me Gusta actualizado (éxito: {})", res),
+                        false,
+                    )
                 }
                 Err(e) => (format!("Error al actualizar Me Gusta: {}", e), true),
             }
         }
 
-        "capi_sync_youtube" => {
-            match engine.sync_ytm().await {
-                Ok(sync_res) => {
-                    let _ = app_handle.emit("ytm-sync-completed", serde_json::to_value(&sync_res).unwrap_or_default());
-                    (format!(
+        "capi_sync_youtube" => match engine.sync_ytm().await {
+            Ok(sync_res) => {
+                let _ = app_handle.emit(
+                    "ytm-sync-completed",
+                    serde_json::to_value(&sync_res).unwrap_or_default(),
+                );
+                (format!(
                         "Sincronización completada con éxito: {} canciones favoritas, {} playlists, {} artistas suscritos.",
                         sync_res.liked_songs.len(),
                         sync_res.playlists.len(),
                         sync_res.artists.len()
                     ), false)
-                }
-                Err(e) => (format!("Error en sincronización: {}", e), true),
             }
-        }
+            Err(e) => (format!("Error en sincronización: {}", e), true),
+        },
 
         "capi_get_downloads" => {
             let mut tracks = Vec::new();
@@ -857,16 +941,31 @@ async fn execute_tool(
             match engine.search(query).await {
                 Ok(songs) => {
                     if let Some(song) = songs.into_iter().next() {
-                        let _ = app_handle.emit("mcp-command", json!({
-                            "action": "download-track",
-                            "track": song
-                        }));
-                        (format!("Iniciando descarga de '{}' por '{}'", song.title, song.artist), false)
+                        let _ = app_handle.emit(
+                            "mcp-command",
+                            json!({
+                                "action": "download-track",
+                                "track": song
+                            }),
+                        );
+                        (
+                            format!(
+                                "Iniciando descarga de '{}' por '{}'",
+                                song.title, song.artist
+                            ),
+                            false,
+                        )
                     } else {
-                        (format!("No se encontró ninguna canción para '{}'", query), true)
+                        (
+                            format!("No se encontró ninguna canción para '{}'", query),
+                            true,
+                        )
                     }
                 }
-                Err(e) => (format!("Error buscando canción para descargar: {}", e), true),
+                Err(e) => (
+                    format!("Error buscando canción para descargar: {}", e),
+                    true,
+                ),
             }
         }
 
@@ -878,10 +977,13 @@ async fn execute_tool(
 
         "capi_navigate" => {
             let tab = args.get("tab").and_then(|v| v.as_str()).unwrap_or("home");
-            let _ = app_handle.emit("mcp-command", json!({
-                "action": "navigate",
-                "tab": tab
-            }));
+            let _ = app_handle.emit(
+                "mcp-command",
+                json!({
+                    "action": "navigate",
+                    "tab": tab
+                }),
+            );
             (format!("Navegando a la pestaña: {}", tab), false)
         }
 
@@ -890,10 +992,13 @@ async fn execute_tool(
             if message.trim().is_empty() {
                 return ("El mensaje no puede estar vacío".to_string(), true);
             }
-            let _ = app_handle.emit("mcp-command", json!({
-                "action": "show-toast",
-                "message": message
-            }));
+            let _ = app_handle.emit(
+                "mcp-command",
+                json!({
+                    "action": "show-toast",
+                    "message": message
+                }),
+            );
             (format!("Notificación mostrada: {}", message), false)
         }
 
@@ -916,9 +1021,19 @@ fn scan_downloads_dir(dir: &std::path::Path, depth: usize, max_depth: usize, out
             } else if path.is_file() {
                 if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
                     let ext_lower = ext.to_lowercase();
-                    if matches!(ext_lower.as_str(), "mp3" | "m4a" | "opus" | "webm" | "flac" | "ogg" | "wav") {
-                        let file_stem = path.file_stem().and_then(|n| n.to_str()).unwrap_or("Canción");
-                        let artist_dir = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()).unwrap_or("Local");
+                    if matches!(
+                        ext_lower.as_str(),
+                        "mp3" | "m4a" | "opus" | "webm" | "flac" | "ogg" | "wav"
+                    ) {
+                        let file_stem = path
+                            .file_stem()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("Canción");
+                        let artist_dir = path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("Local");
                         out.push(json!({
                             "title": file_stem,
                             "artist": artist_dir,
@@ -958,7 +1073,9 @@ pub fn run_stdio_mcp() {
         }
 
         let req_json: Option<Value> = serde_json::from_str(trimmed).ok();
-        let method = req_json.as_ref().and_then(|v| v.get("method").and_then(|m| m.as_str()));
+        let method = req_json
+            .as_ref()
+            .and_then(|v| v.get("method").and_then(|m| m.as_str()));
         let id = req_json.as_ref().and_then(|v| v.get("id").cloned());
 
         let mut target_port = port;
@@ -1016,7 +1133,9 @@ pub fn run_stdio_mcp() {
                     });
                     let _ = writeln!(stdout, "{}", init_resp);
                     let _ = stdout.flush();
-                } else if method == Some("notifications/initialized") || method == Some("initialized") {
+                } else if method == Some("notifications/initialized")
+                    || method == Some("initialized")
+                {
                     // Notificación sin respuesta
                 } else if method == Some("tools/list") {
                     let tools = get_tool_definitions();

@@ -211,9 +211,10 @@ impl YtmClient {
     }
 
     fn build_context_json(&self, session: &YtmSession) -> Value {
-        let on_behalf_of = session.data_sync_id.as_deref().map(|id| {
-            id.split("||").next().unwrap_or(id).trim()
-        });
+        let on_behalf_of = session
+            .data_sync_id
+            .as_deref()
+            .map(|id| id.split("||").next().unwrap_or(id).trim());
         serde_json::json!({
             "client": {
                 "clientName": "WEB_REMIX",
@@ -367,12 +368,18 @@ impl YtmClient {
             .await
             .map_err(|e| EngineError::Network(e.to_string()))?;
 
-        if let Some(cid) = json["header"]["musicImmersiveHeaderRenderer"]["subscriptionButton"]["subscribeButtonRenderer"]["channelId"].as_str() {
+        if let Some(cid) = json["header"]["musicImmersiveHeaderRenderer"]["subscriptionButton"]
+            ["subscribeButtonRenderer"]["channelId"]
+            .as_str()
+        {
             if cid.starts_with("UC") {
                 return Ok(cid.to_string());
             }
         }
-        if let Some(cid) = json["header"]["musicVisualHeaderRenderer"]["subscriptionButton"]["subscribeButtonRenderer"]["channelId"].as_str() {
+        if let Some(cid) = json["header"]["musicVisualHeaderRenderer"]["subscriptionButton"]
+            ["subscribeButtonRenderer"]["channelId"]
+            .as_str()
+        {
             if cid.starts_with("UC") {
                 return Ok(cid.to_string());
             }
@@ -410,7 +417,9 @@ impl YtmClient {
         let clean_id = if channel_id.starts_with("UC") {
             channel_id.to_string()
         } else {
-            self.resolve_channel_id(channel_id).await.unwrap_or_else(|_| channel_id.to_string())
+            self.resolve_channel_id(channel_id)
+                .await
+                .unwrap_or_else(|_| channel_id.to_string())
         };
 
         let body = serde_json::json!({
@@ -458,7 +467,9 @@ impl YtmClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| EngineError::Network(format!("Error al crear playlist en YouTube: {e}")))?;
+            .map_err(|e| {
+                EngineError::Network(format!("Error al crear playlist en YouTube: {e}"))
+            })?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -512,7 +523,11 @@ impl YtmClient {
         Ok(response.status().is_success())
     }
 
-    pub async fn add_to_playlist(&self, playlist_id: &str, video_id: &str) -> Result<bool, EngineError> {
+    pub async fn add_to_playlist(
+        &self,
+        playlist_id: &str,
+        video_id: &str,
+    ) -> Result<bool, EngineError> {
         let endpoint = "https://music.youtube.com/youtubei/v1/browse/edit_playlist";
         let session = self.session.read().await;
         if extract_sapisid(&session.cookie).is_none() {
@@ -542,7 +557,9 @@ impl YtmClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| EngineError::Network(format!("Error al agregar canción a playlist: {e}")))?;
+            .map_err(|e| {
+                EngineError::Network(format!("Error al agregar canción a playlist: {e}"))
+            })?;
 
         Ok(response.status().is_success())
     }
@@ -881,7 +898,9 @@ impl YtmClient {
             .json(&body)
             .send()
             .await
-            .map_err(|e| EngineError::Network(format!("Error al obtener playlist autenticada: {e}")))?;
+            .map_err(|e| {
+                EngineError::Network(format!("Error al obtener playlist autenticada: {e}"))
+            })?;
 
         let json: Value = response
             .json()
@@ -1155,19 +1174,29 @@ fn extract_playlist_song_count(json: &Value) -> Option<usize> {
 
 fn find_first_playlist_shelf(json: &Value) -> Option<&Value> {
     // 1. Camino directo: twoColumnBrowseResultsRenderer -> secondaryContents -> sectionListRenderer -> contents
-    if let Some(sec) = json.pointer("/contents/twoColumnBrowseResultsRenderer/secondaryContents/sectionListRenderer/contents") {
+    if let Some(sec) = json.pointer(
+        "/contents/twoColumnBrowseResultsRenderer/secondaryContents/sectionListRenderer/contents",
+    ) {
         if let Some(arr) = sec.as_array() {
             for item in arr {
                 if let Some(shelf) = item.get("musicPlaylistShelfRenderer") {
                     return Some(shelf);
                 }
-                if let Some(shelf) = item.pointer("/itemSectionRenderer/contents/0/musicPlaylistShelfRenderer") {
+                if let Some(shelf) =
+                    item.pointer("/itemSectionRenderer/contents/0/musicPlaylistShelfRenderer")
+                {
                     return Some(shelf);
                 }
                 if let Some(shelf) = item.get("musicShelfRenderer") {
-                    let title = shelf.pointer("/title/runs/0/text").and_then(|t| t.as_str()).unwrap_or("");
+                    let title = shelf
+                        .pointer("/title/runs/0/text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or("");
                     let tl = title.to_lowercase();
-                    if !tl.contains("sugerencia") && !tl.contains("suggestion") && !tl.contains("relacionad") {
+                    if !tl.contains("sugerencia")
+                        && !tl.contains("suggestion")
+                        && !tl.contains("relacionad")
+                    {
                         return Some(shelf);
                     }
                 }
@@ -1249,7 +1278,10 @@ fn parse_shelf_contents(shelf: &Value, songs: &mut Vec<Song>) -> Option<String> 
     if next_token.is_none() {
         if let Some(conts) = shelf.get("continuations").and_then(|c| c.as_array()) {
             for cont in conts {
-                if let Some(t) = cont.pointer("/nextContinuationData/continuation").and_then(|t| t.as_str()) {
+                if let Some(t) = cont
+                    .pointer("/nextContinuationData/continuation")
+                    .and_then(|t| t.as_str())
+                {
                     next_token = Some(t.to_string());
                     break;
                 }
@@ -1268,9 +1300,13 @@ fn extract_playlist_shelf_tracks(json: &Value, songs: &mut Vec<Song>) -> Option<
     }
 }
 
-fn extract_playlist_continuation_tracks(cont_json: &Value, songs: &mut Vec<Song>) -> Option<String> {
+fn extract_playlist_continuation_tracks(
+    cont_json: &Value,
+    songs: &mut Vec<Song>,
+) -> Option<String> {
     // 1. continuationContents.musicPlaylistShelfContinuation
-    if let Some(pl_cont) = cont_json.pointer("/continuationContents/musicPlaylistShelfContinuation") {
+    if let Some(pl_cont) = cont_json.pointer("/continuationContents/musicPlaylistShelfContinuation")
+    {
         return parse_shelf_contents(pl_cont, songs);
     }
 
@@ -1280,9 +1316,15 @@ fn extract_playlist_continuation_tracks(cont_json: &Value, songs: &mut Vec<Song>
     }
 
     // 3. onResponseReceivedActions -> appendContinuationItemsAction
-    if let Some(actions) = cont_json.get("onResponseReceivedActions").and_then(|a| a.as_array()) {
+    if let Some(actions) = cont_json
+        .get("onResponseReceivedActions")
+        .and_then(|a| a.as_array())
+    {
         for action in actions {
-            if let Some(items) = action.pointer("/appendContinuationItemsAction/continuationItems").and_then(|i| i.as_array()) {
+            if let Some(items) = action
+                .pointer("/appendContinuationItemsAction/continuationItems")
+                .and_then(|i| i.as_array())
+            {
                 let mut next_token = None;
                 for item in items {
                     if let Some(renderer) = item.get("musicResponsiveListItemRenderer") {
@@ -1311,9 +1353,15 @@ fn extract_playlist_continuation_tracks(cont_json: &Value, songs: &mut Vec<Song>
     }
 
     // 4. continuationContents.sectionListContinuation
-    if let Some(sec_contents) = cont_json.pointer("/continuationContents/sectionListContinuation/contents").and_then(|c| c.as_array()) {
+    if let Some(sec_contents) = cont_json
+        .pointer("/continuationContents/sectionListContinuation/contents")
+        .and_then(|c| c.as_array())
+    {
         for sec in sec_contents {
-            if let Some(shelf) = sec.get("musicPlaylistShelfRenderer").or_else(|| sec.get("musicShelfRenderer")) {
+            if let Some(shelf) = sec
+                .get("musicPlaylistShelfRenderer")
+                .or_else(|| sec.get("musicShelfRenderer"))
+            {
                 return parse_shelf_contents(shelf, songs);
             }
         }
@@ -1494,7 +1542,9 @@ fn parse_playlist_responsive(r: &Value) -> Option<YtmPlaylist> {
         return None;
     }
 
-    if !raw_browse_id.starts_with("VL") && !clean_id.starts_with("PL") && !clean_id.starts_with("RD")
+    if !raw_browse_id.starts_with("VL")
+        && !clean_id.starts_with("PL")
+        && !clean_id.starts_with("RD")
     {
         return None;
     }
@@ -1580,7 +1630,8 @@ fn parse_artist_responsive(r: &Value) -> Option<YtmArtist> {
         .as_str()?
         .to_string();
 
-    let page_type = r["navigationEndpoint"]["browseEndpoint"]["browseEndpointContextSupportedConfigs"]["browseEndpointContextMusicConfig"]["pageType"]
+    let page_type = r["navigationEndpoint"]["browseEndpoint"]
+        ["browseEndpointContextSupportedConfigs"]["browseEndpointContextMusicConfig"]["pageType"]
         .as_str()
         .unwrap_or("");
     if !page_type.contains("ARTIST") && !browse_id.starts_with("UC") {

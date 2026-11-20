@@ -109,7 +109,11 @@ impl Engine {
         self.ytm.delete_playlist(playlist_id).await
     }
 
-    pub async fn add_to_ytm_playlist(&self, playlist_id: &str, video_id: &str) -> Result<bool, EngineError> {
+    pub async fn add_to_ytm_playlist(
+        &self,
+        playlist_id: &str,
+        video_id: &str,
+    ) -> Result<bool, EngineError> {
         self.ytm.add_to_playlist(playlist_id, video_id).await
     }
 
