@@ -760,6 +760,11 @@ function App() {
     photo?: string | null;
   }
   const [ytmAccount, setYtmAccount] = useState<YtmAccountState>({ loggedIn: false });
+  const ytmAccountRef = useRef<YtmAccountState>(ytmAccount);
+  useEffect(() => {
+    ytmAccountRef.current = ytmAccount;
+  }, [ytmAccount]);
+
   const [isSyncingYtm, setIsSyncingYtm] = useState(false);
   const [showYtmModal, setShowYtmModal] = useState(false);
   const [ytmCookieInput, setYtmCookieInput] = useState("");
@@ -881,7 +886,9 @@ function App() {
       setYtmCookieInput("");
       if (state.loggedIn) {
         showToast("¡Sesión iniciada con éxito en YouTube Music!");
-        handleSyncYtm();
+        localStorage.setItem("capi_ytm_intro_modal_seen", "true");
+        setShowYtmModal(false);
+        handleSyncYtm(true, true);
       } else {
         showToast("Cookie guardada, pero no se detectó SAPISID válido.");
       }
@@ -894,15 +901,27 @@ function App() {
     try {
       await invoke("cerrar_sesion_ytm");
       setYtmAccount({ loggedIn: false });
+      ytmAccountRef.current = { loggedIn: false };
       showToast("Sesión de YouTube Music cerrada. Tus playlists sincronizadas se mantienen guardadas.");
     } catch (e) {
       showToast("Error al cerrar sesión: " + e);
     }
   };
 
-  const handleSyncYtm = async () => {
-    if (!ytmAccount.loggedIn) {
-      setShowYtmModal(true);
+  const handleSyncYtm = async (options?: boolean | { forceLoggedIn?: boolean; silent?: boolean } | React.MouseEvent, silent = false) => {
+    let forceLoggedIn: boolean | undefined = undefined;
+    let isSilent = silent;
+    if (typeof options === "boolean") {
+      forceLoggedIn = options;
+    } else if (options && typeof options === "object" && !("nativeEvent" in options) && "forceLoggedIn" in options) {
+      forceLoggedIn = options.forceLoggedIn;
+      if (options.silent !== undefined) isSilent = options.silent;
+    }
+    const isLogged = forceLoggedIn ?? ytmAccountRef.current.loggedIn;
+    if (!isLogged) {
+      if (!isSilent) {
+        setShowYtmModal(true);
+      }
       return;
     }
     setIsSyncingYtm(true);
@@ -1190,6 +1209,7 @@ function App() {
       .then(json => {
         const state = JSON.parse(json);
         setYtmAccount(state);
+        ytmAccountRef.current = state;
         if (state.photo) {
           setCapiAvatar(state.photo);
           localStorage.setItem("capi_user_avatar", state.photo);
@@ -1199,7 +1219,17 @@ function App() {
           localStorage.setItem("capi_username", state.name);
         }
         if (state.loggedIn) {
-          handleSyncYtm();
+          localStorage.setItem("capi_ytm_intro_modal_seen", "true");
+          handleSyncYtm(true, true);
+        } else {
+          const savedData = safeJsonParse<YtmSyncDataState>(localStorage.getItem("capi_ytm_sync_data"), { likedSongs: [], playlists: [], artists: [] });
+          const hasSyncedItems = (savedData.playlists?.length || 0) > 0 || (savedData.likedSongs?.length || 0) > 0;
+          const introAlreadySeen = localStorage.getItem("capi_ytm_intro_modal_seen") === "true";
+
+          if (!hasSyncedItems && !introAlreadySeen) {
+            setShowYtmModal(true);
+            localStorage.setItem("capi_ytm_intro_modal_seen", "true");
+          }
         }
       })
       .catch(() => {});
@@ -1239,11 +1269,13 @@ function App() {
         if (success) {
           const userLabel = name || email || "cuenta vinculada";
           showToast(`¡Conectado a YouTube Music con éxito! (${userLabel})`);
+          localStorage.setItem("capi_ytm_intro_modal_seen", "true");
           setShowYtmModal(false);
           invoke<string>("obtener_estado_sesion_ytm")
             .then(json => {
               const state = JSON.parse(json);
               setYtmAccount(state);
+              ytmAccountRef.current = state;
               if (state.photo) {
                 setCapiAvatar(state.photo);
                 localStorage.setItem("capi_user_avatar", state.photo);
@@ -1254,7 +1286,7 @@ function App() {
               }
             })
             .catch(() => {});
-          handleSyncYtm();
+          handleSyncYtm(true, true);
         } else if (!cancelled && message) {
           showToast(`Error al conectar con YouTube Music: ${message}`);
         }
@@ -11543,7 +11575,7 @@ function App() {
 
       {/* YOUTUBE MUSIC MODAL */}
       {SHOW_YTM_SYNC_UI && showYtmModal && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60] animate-fade-in" onClick={() => setShowYtmModal(false)}>
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[60] animate-fade-in" onClick={() => { setShowYtmModal(false); localStorage.setItem("capi_ytm_intro_modal_seen", "true"); }}>
           <div className="glass p-6 rounded-3xl max-w-md w-full border border-red-500/20 shadow-2xl mx-4 modal-content text-left space-y-5" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between border-b border-white/5 pb-3">
               <div className="flex items-center gap-2.5">
@@ -11556,8 +11588,8 @@ function App() {
                 </div>
               </div>
               <button
-                onClick={() => setShowYtmModal(false)}
-                className="p-1.5 rounded-lg text-text-secondary hover:text-white hover:bg-white/5 transition"
+                onClick={() => { setShowYtmModal(false); localStorage.setItem("capi_ytm_intro_modal_seen", "true"); }}
+                className="p-1.5 rounded-lg text-text-secondary hover:text-white hover:bg-white/5 transition cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
